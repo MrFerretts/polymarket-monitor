@@ -101,6 +101,7 @@ def is_btc_directional(m: dict) -> bool:
     has_directional = any(kw in q for kw in [
         "above", "reach", "exceed", "higher", "over", "hit",
         "below", "under", "lower", "drop", "fall",
+        "up or down", "up/down",
     ])
     has_num = any(c.isdigit() for c in q)
     is_range = "between" in q and "and" in q
