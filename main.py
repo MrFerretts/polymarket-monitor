@@ -34,21 +34,27 @@ async def fetch_polymarket_loop():
                 if not isinstance(markets, list):
                     markets = markets.get("data", [])
 
-                # Filtrar SOLO mercados de precio BTC (excluir política, ETF, regulación)
+                # Filtrar mercados de precio BTC DIRECCIONALES
+                # Excluir: política, ETF, regulación, y mercados de RANGO ("between X and Y")
                 btc = []
                 for m in markets:
                     q = (m.get("question","") + " " + m.get("title","")).lower()
                     has_btc   = "bitcoin" in q or "btc" in q
-                    has_price = any(kw in q for kw in [
-                        "$", "usd", "price", "above", "reach", "exceed", "higher", "over", "hit"
+                    # Mercados direccionales: "above", "reach", "hit", "exceed", "higher"
+                    has_directional = any(kw in q for kw in [
+                        "above", "reach", "exceed", "higher", "over", "hit",
+                        "below", "under", "lower", "drop", "fall",
                     ])
                     has_num   = any(c.isdigit() for c in q)
+                    # Excluir mercados de rango ("between X and Y") — comparan
+                    # probabilidad de rango vs probabilidad direccional del modelo
+                    is_range  = "between" in q and "and" in q
                     is_noise  = any(kw in q for kw in [
                         "etf","senate","congress","election","president","party",
                         "sec","approve","ban","regulation","legal","trump","biden",
                         "republican","democrat","fed","interest rate","hold","fewer","seat"
                     ])
-                    if has_btc and has_price and has_num and not is_noise:
+                    if has_btc and has_directional and has_num and not is_noise and not is_range:
                         btc.append(m)
 
                 pool = btc if btc else markets[:5]
