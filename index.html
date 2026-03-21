@@ -557,8 +557,8 @@ const state = {
   impliedVol: null,
   lastUpdate: null,
   history: [],
-  refreshInterval: 60,   // segundos
-  countdown: 60,
+  refreshInterval: 30,   // segundos (sincronizado con backend)
+  countdown: 30,
   ws: null,
   loading: false,
   polyMarketId: null,    // se buscará dinámicamente
@@ -614,7 +614,12 @@ function connectBinanceWS() {
     }
 
     updatePriceDisplay();
-    recalcModel();
+    // Throttle: recalcular modelo máximo 1 vez/segundo (Binance envía ~20 ticks/s)
+    const now2 = Date.now();
+    if (!state._lastRecalc || now2 - state._lastRecalc > 1000) {
+      state._lastRecalc = now2;
+      recalcModel();
+    }
   };
 
   ws.onerror = () => setStatus('Error WS, reintentando...', 'red');
@@ -657,57 +662,99 @@ function simulatePolyProb() {
 }
 
 
+// Busca el precio más cercano a un timestamp dado en el historial
+function priceAtTime(history, targetTs) {
+  if (history.length === 0) return null;
+  let best = history[0];
+  let bestDist = Math.abs(history[0].ts - targetTs);
+  for (let i = history.length - 1; i >= 0; i--) {
+    const dist = Math.abs(history[i].ts - targetTs);
+    if (dist < bestDist) { best = history[i]; bestDist = dist; }
+    if (history[i].ts <= targetTs) break;
+  }
+  return best.price;
+}
+
+// Muestrea el historial a intervalos regulares de 1 segundo
+function samplePrices(history, seconds) {
+  const now = Date.now();
+  const samples = [];
+  for (let s = seconds; s >= 0; s--) {
+    const p = priceAtTime(history, now - s * 1000);
+    if (p != null) samples.push(p);
+  }
+  return samples;
+}
+
 function calcModelProb() {
   if (!state.btcPrice || state.btcPriceHistory.length < 15) return null;
 
-  const prices = state.btcPriceHistory.slice(-300).map(p => p.price); // ~5 min de ticks
-  if (prices.length < 15) return null;
+  const hist = state.btcPriceHistory;
+  const now = Date.now();
+  const dataSpanSec = (hist[hist.length-1].ts - hist[0].ts) / 1000;
+
+  // Necesitamos al menos 60 segundos reales de datos
+  if (dataSpanSec < 60) return null;
 
   // ── Señal 1: Momentum de corto plazo (últimos 60s vs 60s anteriores)
-  const recent = prices.slice(-60);
-  const older  = prices.length >= 120 ? prices.slice(-120, -60) : prices.slice(0, Math.floor(prices.length/2));
-  const recentAvg = recent.reduce((a,b)=>a+b,0) / recent.length;
-  const olderAvg  = older.reduce((a,b)=>a+b,0)  / older.length;
-  const momentum  = (recentAvg - olderAvg) / olderAvg; // fracción
+  const recentSamples = samplePrices(hist, 60);  // últimos 60 segundos
+  const olderStart = Math.min(120, Math.floor(dataSpanSec));
+  const olderSamples = [];
+  for (let s = olderStart; s > 60; s--) {
+    const p = priceAtTime(hist, now - s * 1000);
+    if (p != null) olderSamples.push(p);
+  }
 
-  // ── Señal 2: Volatilidad realizada (últimos 2 min)
-  const volPrices = prices.slice(-120);
+  if (recentSamples.length < 5 || olderSamples.length < 5) return null;
+
+  const recentAvg = recentSamples.reduce((a,b)=>a+b,0) / recentSamples.length;
+  const olderAvg  = olderSamples.reduce((a,b)=>a+b,0)  / olderSamples.length;
+  const momentum  = (recentAvg - olderAvg) / olderAvg;
+
+  // ── Señal 2: Volatilidad realizada (últimos 2 min, muestreado a 1s)
+  const volSeconds = Math.min(120, Math.floor(dataSpanSec));
+  const volSamples = samplePrices(hist, volSeconds);
   const rets = [];
-  for (let i = 1; i < volPrices.length; i++) {
-    rets.push(Math.log(volPrices[i] / volPrices[i-1]));
+  for (let i = 1; i < volSamples.length; i++) {
+    if (volSamples[i] > 0 && volSamples[i-1] > 0) {
+      rets.push(Math.log(volSamples[i] / volSamples[i-1]));
+    }
   }
   const meanR = rets.length > 0 ? rets.reduce((a,b)=>a+b,0)/rets.length : 0;
   const varR  = rets.length > 1 ? rets.reduce((a,b)=>a+(b-meanR)**2,0)/rets.length : 0.00001;
-  const volTick = Math.sqrt(Math.max(varR, 1e-10));
-  // Vol anualizada para mostrar (BTC ~60-80% típico)
-  state.impliedVol = Math.min(volTick * Math.sqrt(365*24*3600), 2.0);
+  const volPerSec = Math.sqrt(Math.max(varR, 1e-12));
+  // Vol anualizada: vol_por_segundo * sqrt(segundos_por_año)
+  state.impliedVol = Math.min(volPerSec * Math.sqrt(365.25 * 24 * 3600), 3.0);
 
-  // ── Señal 3: Mean reversion — si subió mucho, tiende a corregir en 5min
-  // En BTC de corto plazo hay ligera reversión a la media
-  const change5m = prices.length >= 300
-    ? (prices[prices.length-1] - prices[prices.length-301]) / prices[prices.length-301]
+  // ── Señal 3: Mean reversion — si subió mucho en 5min, tiende a corregir
+  const lookback5m = Math.min(300, Math.floor(dataSpanSec));
+  const price5mAgo = priceAtTime(hist, now - lookback5m * 1000);
+  const priceNow = state.btcPrice;
+  const change5m = (price5mAgo && price5mAgo > 0)
+    ? (priceNow - price5mAgo) / price5mAgo
     : momentum;
-  const reversionSignal = -change5m * 0.3; // leve reverso al movimiento reciente
+  const reversionSignal = -change5m * 0.3;
 
   // ── Combinar señales con pesos
-  // momentum tiene sesgo positivo en mercados trending, reversión en laterales
-  // Con pocos datos, usamos ponderación conservadora
   const rawSignal = (momentum * 0.5) + (reversionSignal * 0.5);
 
-  // ── Normalizar: vol de 5 min ≈ vol_anual / sqrt(365*24*12)
-  const vol5min = Math.max(volTick * Math.sqrt(300), 0.0005); // vol en 5 min
+  // ── Normalizar por vol de 5 minutos
+  const vol5min = Math.max(volPerSec * Math.sqrt(300), 0.0005);
   const zScore  = rawSignal / vol5min;
 
-  // Clamp muy conservador: máximo ±1.5 desv. Para 5 min, nunca >72%
+  // Clamp conservador: máximo ±1.5 desv estándar
   const zClamped = Math.max(-1.5, Math.min(1.5, zScore));
-  const prob = normalCDF(zClamped * 0.35); // factor conservador
+  const prob = normalCDF(zClamped * 0.35);
 
-  // En 5 minutos: rango realista es 38%-62%
+  // Rango realista para 5 minutos: 38%-62%
   return Math.max(0.38, Math.min(0.62, prob));
 }
 
-// CDF normal estándar (aproximación)
+// CDF normal estándar (aproximación Abramowitz & Stegun)
 function normalCDF(x) {
+  if (!isFinite(x)) return 0.5;
+  if (x > 8) return 1.0;
+  if (x < -8) return 0.0;
   const a1=0.254829592, a2=-0.284496736, a3=1.421413741;
   const a4=-1.453152027, a5=1.061405429, p=0.3275911;
   const sign = x < 0 ? -1 : 1;
