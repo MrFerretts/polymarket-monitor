@@ -616,6 +616,141 @@
 
   .bt-trades-table::-webkit-scrollbar { width: 4px; }
   .bt-trades-table::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* ── News & Sentiment Section ── */
+  .news-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+    margin-bottom: 20px;
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .news-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .sentiment-badge {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    padding: 4px 12px;
+    border-radius: 6px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .sentiment-badge.bullish { border-color: var(--green); color: var(--green); }
+  .sentiment-badge.bearish { border-color: var(--red); color: var(--red); }
+  .sentiment-badge.neutral { border-color: var(--yellow); color: var(--yellow); }
+
+  .sentiment-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--surface2);
+    border-radius: 99px;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .sentiment-bar-fill {
+    height: 100%;
+    border-radius: 99px;
+    transition: width 0.8s ease, background 0.5s;
+  }
+
+  .sentiment-bar-labels {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+
+  .news-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .news-list::-webkit-scrollbar { width: 4px; }
+  .news-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .news-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    transition: border-color 0.2s;
+  }
+
+  .news-item:hover { border-color: var(--accent); }
+
+  .news-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-top: 6px;
+    flex-shrink: 0;
+  }
+
+  .news-dot.pos { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .news-dot.neg { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .news-dot.neu { background: var(--yellow); box-shadow: 0 0 4px var(--yellow); }
+
+  .news-content { flex: 1; min-width: 0; }
+
+  .news-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.4;
+    margin-bottom: 3px;
+    color: var(--text);
+  }
+
+  .news-title a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .news-title a:hover { color: var(--accent); }
+
+  .news-meta {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--muted);
+  }
+
+  /* ── Spread indicator ── */
+  .spread-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-left: 6px;
+  }
+
+  .spread-indicator.tight { background: rgba(0,255,136,0.1); color: var(--green); }
+  .spread-indicator.medium { background: rgba(255,208,96,0.1); color: var(--yellow); }
+  .spread-indicator.wide { background: rgba(255,61,90,0.1); color: var(--red); }
 </style>
 </head>
 <body>
@@ -656,7 +791,8 @@
       <div class="card-label">Probabilidad Polymarket</div>
       <div class="card-value" id="poly-prob">—</div>
       <div class="card-sub">
-        BTC sube en <span id="poly-market-name">próximas horas</span>
+        <span id="poly-market-name">Buscando mercado...</span>
+        <span class="spread-indicator medium" id="spread-badge" style="display:none">Spread: —</span>
       </div>
     </div>
 
@@ -788,6 +924,28 @@
     <div class="api-note">⚠️ El backtest usa datos generados sintéticamente con parámetros realistas. No representa rendimiento real ni garantiza resultados futuros.</div>
   </div>
 
+  <!-- News & Sentiment -->
+  <div class="news-section" id="news-section">
+    <div class="news-header">
+      <div class="section-title" style="margin-bottom:0">Noticias BTC · Sentimiento</div>
+      <div class="sentiment-badge neutral" id="sentiment-badge">Cargando...</div>
+    </div>
+    <div class="sentiment-bar">
+      <div class="sentiment-bar-fill" id="sentiment-fill" style="width:50%; background: var(--yellow)"></div>
+    </div>
+    <div class="sentiment-bar-labels">
+      <span>Bearish</span>
+      <span>Neutral</span>
+      <span>Bullish</span>
+    </div>
+    <div class="news-list" id="news-list">
+      <div style="font-family:'Space Mono',monospace;font-size:0.65rem;color:var(--muted);padding:20px;text-align:center;">
+        Cargando noticias BTC...
+      </div>
+    </div>
+    <div class="api-note">Fuente: Google News RSS · Sentimiento por análisis de palabras clave · Actualización cada 5 min</div>
+  </div>
+
   <div class="history-section">
     <div class="section-title">Historial de señales esta sesión</div>
     <table>
@@ -807,7 +965,7 @@
       </tbody>
     </table>
     <div class="api-note">
-      Datos: Binance WebSocket (precio real) · Polymarket CLOB API (probabilidad real) · Modelo: Black-Scholes simplificado
+      Datos: Binance WebSocket (precio real) · Polymarket CLOB API (probabilidad + spread) · Google News (sentimiento) · Modelo: Momentum + Mean Reversion
     </div>
   </div>
 
@@ -901,8 +1059,6 @@ function connectBinanceWS() {
 // ─── Polymarket API ──────────────────────────────────────────────
 // Busca el mercado más activo de BTC up/down
 async function fetchPolymarketProb() {
-  // En Railway: llamamos a nuestro propio servidor (sin CORS)
-  // En Netlify/local: cae al fallback simulado
   try {
     const res = await fetch('/api/polymarket', { signal: AbortSignal.timeout(6000) });
     if (res.ok) {
@@ -910,14 +1066,113 @@ async function fetchPolymarketProb() {
       if (data.prob && data.prob > 0.01 && data.prob < 0.99) {
         $('poly-market-name').textContent = (data.market || 'BTC market').substring(0, 50);
         setStatus('Polymarket en vivo ✓', 'green');
+
+        // Mostrar spread
+        updateSpreadBadge(data.spread, data.volume);
+
         return data.prob;
       }
     }
   } catch(e) { console.warn('API local:', e.message); }
 
-  // Fallback cuando corre como HTML puro (sin servidor)
   setStatus('Estimación local (sin servidor)', 'yellow');
   return simulatePolyProb();
+}
+
+function updateSpreadBadge(spread, volume) {
+  const badge = $('spread-badge');
+  if (spread == null) {
+    badge.style.display = 'none';
+    return;
+  }
+  badge.style.display = 'inline-flex';
+  const spreadPct = (spread * 100).toFixed(1);
+
+  // Clasificar: tight < 2%, medium 2-5%, wide > 5%
+  let cls, label;
+  if (spread < 0.02) {
+    cls = 'tight';
+    label = 'Tight';
+  } else if (spread < 0.05) {
+    cls = 'medium';
+    label = 'Medium';
+  } else {
+    cls = 'wide';
+    label = 'Wide';
+  }
+  badge.className = `spread-indicator ${cls}`;
+  badge.textContent = `Spread: ${spreadPct}% · ${label}`;
+}
+
+// ─── News & Sentiment ───────────────────────────────────────────
+async function fetchNews() {
+  try {
+    const res = await fetch('/api/news', { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return;
+    const data = await res.json();
+    renderNews(data);
+    state.newsSentiment = data.sentiment;
+  } catch(e) { console.warn('News fetch:', e.message); }
+}
+
+function renderNews(data) {
+  const list = $('news-list');
+  const badge = $('sentiment-badge');
+  const fill = $('sentiment-fill');
+
+  // Sentiment badge
+  const s = data.sentiment || 0;
+  const pct = Math.round((s + 1) / 2 * 100); // -1..1 → 0..100%
+  fill.style.width = pct + '%';
+
+  if (s > 0.15) {
+    badge.className = 'sentiment-badge bullish';
+    badge.textContent = `Bullish ${(s * 100).toFixed(0)}%`;
+    fill.style.background = 'var(--green)';
+  } else if (s < -0.15) {
+    badge.className = 'sentiment-badge bearish';
+    badge.textContent = `Bearish ${(s * 100).toFixed(0)}%`;
+    fill.style.background = 'var(--red)';
+  } else {
+    badge.className = 'sentiment-badge neutral';
+    badge.textContent = 'Neutral';
+    fill.style.background = 'var(--yellow)';
+  }
+
+  // Articles
+  if (!data.articles || data.articles.length === 0) {
+    list.innerHTML = '<div style="font-family:\'Space Mono\',monospace;font-size:0.65rem;color:var(--muted);padding:20px;text-align:center;">Sin noticias disponibles</div>';
+    return;
+  }
+
+  list.innerHTML = data.articles.map(a => {
+    const dotCls = a.sentiment > 0.1 ? 'pos' : a.sentiment < -0.1 ? 'neg' : 'neu';
+    const timeAgo = a.date ? formatTimeAgo(new Date(a.date)) : '';
+    return `
+      <div class="news-item">
+        <div class="news-dot ${dotCls}"></div>
+        <div class="news-content">
+          <div class="news-title"><a href="${a.link}" target="_blank" rel="noopener">${escapeHtml(a.title)}</a></div>
+          <div class="news-meta">${escapeHtml(a.source)} · ${timeAgo}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function formatTimeAgo(date) {
+  const mins = Math.floor((Date.now() - date.getTime()) / 60000);
+  if (mins < 1) return 'ahora';
+  if (mins < 60) return `hace ${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `hace ${hrs}h`;
+  return `hace ${Math.floor(hrs / 24)}d`;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
 }
 
 function simulatePolyProb() {
@@ -1056,7 +1311,12 @@ async function fetchAll() {
   $('refresh-btn').innerHTML = '<span class="spin">⟳</span> Actualizando...';
 
   try {
-    state.polyProb = await fetchPolymarketProb();
+    // Fetch polymarket y noticias en paralelo
+    const [polyProb] = await Promise.all([
+      fetchPolymarketProb(),
+      fetchNews(),
+    ]);
+    state.polyProb = polyProb;
     state.modelProb = calcModelProb();
     state.lastUpdate = new Date();
 

@@ -4,13 +4,15 @@ FastAPI backend — corre en Railway sin problemas de CORS
 """
 import asyncio
 import json
+import re
 import time
+from xml.etree import ElementTree
+
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import os
 
 # ─── Estado compartido en memoria ────────────────────────────────
 state = {
@@ -18,7 +20,95 @@ state = {
     "polyMarket": "Buscando mercado BTC...",
     "lastPolyUpdate": None,
     "error": None,
+    "spread": None,        # bid-ask spread del orderbook
+    "volume": None,        # volumen del mercado seleccionado
 }
+
+news_state = {
+    "articles": [],        # últimas noticias BTC
+    "sentiment": 0,        # -1 a 1 (bearish a bullish)
+    "lastUpdate": None,
+}
+
+# ─── Palabras clave para análisis de sentimiento ──────────────────
+BULLISH_WORDS = [
+    "surge", "soar", "rally", "jump", "gain", "rise", "bull", "high",
+    "record", "breakout", "pump", "moon", "adoption", "buy", "bought",
+    "profit", "growth", "climb", "up", "above", "ath", "institutional",
+    "etf approved", "halving", "bullish", "optimism", "recover",
+    "sube", "alza", "récord", "máximo", "alcista", "ganancia",
+]
+
+BEARISH_WORDS = [
+    "crash", "plunge", "drop", "fall", "dump", "bear", "low", "sell",
+    "loss", "fear", "ban", "hack", "scam", "fraud", "regulation",
+    "crackdown", "decline", "sink", "tumble", "below", "warning",
+    "bubble", "risk", "lawsuit", "sec", "bearish", "panic", "liquidat",
+    "baja", "caída", "desplome", "bajista", "pérdida", "riesgo",
+]
+
+
+def analyze_sentiment(text: str) -> float:
+    """Sentimiento simple por conteo de palabras. Retorna -1 a 1."""
+    text_lower = text.lower()
+    bull_count = sum(1 for w in BULLISH_WORDS if w in text_lower)
+    bear_count = sum(1 for w in BEARISH_WORDS if w in text_lower)
+    total = bull_count + bear_count
+    if total == 0:
+        return 0.0
+    return (bull_count - bear_count) / total
+
+
+def strip_html(text: str) -> str:
+    """Quita tags HTML de un string."""
+    return re.sub(r"<[^>]+>", "", text or "")
+
+
+# ─── Fetch noticias BTC (Google News RSS — sin API key) ──────────
+async def fetch_news_loop():
+    """Busca noticias BTC cada 5 minutos vía Google News RSS."""
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                res = await client.get(
+                    "https://news.google.com/rss/search?q=bitcoin+price&hl=en&gl=US&ceid=US:en",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                res.raise_for_status()
+
+                root = ElementTree.fromstring(res.text)
+                items = root.findall(".//item")[:10]
+
+                articles = []
+                sentiments = []
+                for item in items:
+                    title = strip_html(item.findtext("title", ""))
+                    source = item.findtext("source", "")
+                    pub_date = item.findtext("pubDate", "")
+                    link = item.findtext("link", "")
+
+                    sent = analyze_sentiment(title)
+                    sentiments.append(sent)
+
+                    articles.append({
+                        "title": title[:120],
+                        "source": source,
+                        "date": pub_date,
+                        "link": link,
+                        "sentiment": round(sent, 2),
+                    })
+
+                news_state["articles"] = articles
+                news_state["sentiment"] = round(
+                    sum(sentiments) / len(sentiments), 2
+                ) if sentiments else 0
+                news_state["lastUpdate"] = time.time()
+
+        except Exception as e:
+            print(f"[news] Error: {e}")
+
+        await asyncio.sleep(300)  # cada 5 minutos
+
 
 # ─── Fetch Polymarket (corre en el servidor, sin CORS) ────────────
 async def fetch_polymarket_loop():
@@ -35,19 +125,15 @@ async def fetch_polymarket_loop():
                     markets = markets.get("data", [])
 
                 # Filtrar mercados de precio BTC DIRECCIONALES
-                # Excluir: política, ETF, regulación, y mercados de RANGO ("between X and Y")
                 btc = []
                 for m in markets:
                     q = (m.get("question","") + " " + m.get("title","")).lower()
                     has_btc   = "bitcoin" in q or "btc" in q
-                    # Mercados direccionales: "above", "reach", "hit", "exceed", "higher"
                     has_directional = any(kw in q for kw in [
                         "above", "reach", "exceed", "higher", "over", "hit",
                         "below", "under", "lower", "drop", "fall",
                     ])
                     has_num   = any(c.isdigit() for c in q)
-                    # Excluir mercados de rango ("between X and Y") — comparan
-                    # probabilidad de rango vs probabilidad direccional del modelo
                     is_range  = "between" in q and "and" in q
                     is_noise  = any(kw in q for kw in [
                         "etf","senate","congress","election","president","party",
@@ -83,9 +169,26 @@ async def fetch_polymarket_loop():
                         state["lastPolyUpdate"] = time.time()
                         state["error"] = None
                         found = True
+
+                        # Extraer spread del mercado (bestBid vs bestAsk)
+                        try:
+                            bid = float(m.get("bestBid") or 0)
+                            ask = float(m.get("bestAsk") or 0)
+                            if bid > 0 and ask > 0:
+                                state["spread"] = round(ask - bid, 4)
+                            else:
+                                state["spread"] = None
+                        except (TypeError, ValueError):
+                            state["spread"] = None
+
+                        # Volumen
+                        try:
+                            state["volume"] = float(m.get("volume") or 0)
+                        except (TypeError, ValueError):
+                            state["volume"] = None
+
                         break
 
-                # Si no se encontró mercado válido, marcar como stale después de 5 min
                 if not found and state["lastPolyUpdate"]:
                     if time.time() - state["lastPolyUpdate"] > 300:
                         state["polyProb"] = None
@@ -99,10 +202,11 @@ async def fetch_polymarket_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Arrancar loop de Polymarket en background
-    task = asyncio.create_task(fetch_polymarket_loop())
+    poly_task = asyncio.create_task(fetch_polymarket_loop())
+    news_task = asyncio.create_task(fetch_news_loop())
     yield
-    task.cancel()
+    poly_task.cancel()
+    news_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -123,6 +227,17 @@ async def get_polymarket():
         "market": state["polyMarket"],
         "error": state["error"],
         "updatedAt": state["lastPolyUpdate"],
+        "spread": state["spread"],
+        "volume": state["volume"],
+    })
+
+
+@app.get("/api/news")
+async def get_news():
+    return JSONResponse({
+        "articles": news_state["articles"],
+        "sentiment": news_state["sentiment"],
+        "updatedAt": news_state["lastUpdate"],
     })
 
 
