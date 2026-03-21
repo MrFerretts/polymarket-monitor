@@ -1082,6 +1082,20 @@ function connectBinanceWS() {
       state.btcChange1h = (price - oldest) / oldest;
     }
 
+    // Persistir en sessionStorage cada 10 segundos (muestreado a 1 punto/seg)
+    if (!state._lastPersist || now - state._lastPersist > 10000) {
+      state._lastPersist = now;
+      try {
+        // Guardar muestreado (1 punto/segundo, máx 3600 puntos)
+        const sampled = [];
+        let lastTs = 0;
+        for (const p of state.btcPriceHistory) {
+          if (p.ts - lastTs >= 1000) { sampled.push(p); lastTs = p.ts; }
+        }
+        sessionStorage.setItem('btcHistory', JSON.stringify(sampled.slice(-3600)));
+      } catch(e) { /* sessionStorage full or unavailable */ }
+    }
+
     updatePriceDisplay();
     // Throttle: recalcular modelo máximo 1 vez/segundo (Binance envía ~20 ticks/s)
     const now2 = Date.now();
@@ -1282,68 +1296,119 @@ function samplePrices(history, seconds) {
   return samples;
 }
 
-function calcModelProb() {
-  if (!state.btcPrice || state.btcPriceHistory.length < 15) return null;
+// ── Indicadores técnicos ──────────────────────────────────────────
 
+function getMomentum(seconds) {
+  const hist = state.btcPriceHistory;
+  if (hist.length < 2) return 0;
+  const now = Date.now();
+  const pastPrice = priceAtTime(hist, now - seconds * 1000);
+  if (!pastPrice || pastPrice <= 0) return 0;
+  return (state.btcPrice - pastPrice) / pastPrice;
+}
+
+function calcRSI(periods) {
+  // Construir "velas" de 1 minuto a partir de tick data
   const hist = state.btcPriceHistory;
   const now = Date.now();
-  const dataSpanSec = (hist[hist.length-1].ts - hist[0].ts) / 1000;
-
-  // Necesitamos al menos 60 segundos reales de datos
-  if (dataSpanSec < 60) return null;
-
-  // ── Señal 1: Momentum de corto plazo (últimos 60s vs 60s anteriores)
-  const recentSamples = samplePrices(hist, 60);  // últimos 60 segundos
-  const olderStart = Math.min(120, Math.floor(dataSpanSec));
-  const olderSamples = [];
-  for (let s = olderStart; s > 60; s--) {
-    const p = priceAtTime(hist, now - s * 1000);
-    if (p != null) olderSamples.push(p);
+  const closes = [];
+  for (let i = periods + 1; i >= 0; i--) {
+    const p = priceAtTime(hist, now - i * 60000);
+    if (p) closes.push(p);
   }
+  if (closes.length < periods + 1) return 50; // neutral por defecto
 
-  if (recentSamples.length < 5 || olderSamples.length < 5) return null;
+  let gains = 0, losses = 0;
+  for (let i = 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) gains += diff;
+    else losses -= diff;
+  }
+  const n = closes.length - 1;
+  const avgGain = gains / n;
+  const avgLoss = losses / n;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
 
-  const recentAvg = recentSamples.reduce((a,b)=>a+b,0) / recentSamples.length;
-  const olderAvg  = olderSamples.reduce((a,b)=>a+b,0)  / olderSamples.length;
-  const momentum  = (recentAvg - olderAvg) / olderAvg;
+function detectBreakout() {
+  const hist = state.btcPriceHistory;
+  const now = Date.now();
+  // Últimos 15 min (o lo que haya disponible, mínimo 2 min)
+  const lookback = Math.min(900, Math.max(120, (now - hist[0].ts) / 1000));
+  const samples = samplePrices(hist, Math.floor(lookback));
+  if (samples.length < 10) return 0;
 
-  // ── Señal 2: Volatilidad realizada (últimos 2 min, muestreado a 1s)
-  const volSeconds = Math.min(120, Math.floor(dataSpanSec));
-  const volSamples = samplePrices(hist, volSeconds);
+  const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+  const variance = samples.reduce((a, b) => a + (b - mean) ** 2, 0) / samples.length;
+  const std = Math.sqrt(Math.max(variance, 1e-12));
+
+  const current = state.btcPrice;
+  const zDist = (current - mean) / std;
+
+  // Proporcional: ±1.5 std = ±1.0 señal
+  return Math.max(-1, Math.min(1, zDist / 1.5));
+}
+
+function calcRealizedVol(seconds) {
+  const hist = state.btcPriceHistory;
+  const volSamples = samplePrices(hist, Math.min(seconds, Math.floor((Date.now() - hist[0].ts) / 1000)));
   const rets = [];
   for (let i = 1; i < volSamples.length; i++) {
     if (volSamples[i] > 0 && volSamples[i-1] > 0) {
       rets.push(Math.log(volSamples[i] / volSamples[i-1]));
     }
   }
-  const meanR = rets.length > 0 ? rets.reduce((a,b)=>a+b,0)/rets.length : 0;
-  const varR  = rets.length > 1 ? rets.reduce((a,b)=>a+(b-meanR)**2,0)/rets.length : 0.00001;
-  const volPerSec = Math.sqrt(Math.max(varR, 1e-12));
-  // Vol anualizada: vol_por_segundo * sqrt(segundos_por_año)
+  if (rets.length < 2) return 0;
+  const meanR = rets.reduce((a,b) => a+b, 0) / rets.length;
+  const varR = rets.reduce((a,b) => a + (b - meanR) ** 2, 0) / rets.length;
+  return Math.sqrt(Math.max(varR, 1e-12));
+}
+
+function calcModelProb() {
+  if (!state.btcPrice || state.btcPriceHistory.length < 20) return null;
+
+  const hist = state.btcPriceHistory;
+  const dataSpanSec = (hist[hist.length-1].ts - hist[0].ts) / 1000;
+
+  // Necesitamos al menos 90 segundos reales de datos
+  if (dataSpanSec < 90) return null;
+
+  // ── 1. RSI (14 periodos de 1 minuto)
+  const rsi = calcRSI(14);
+  // RSI > 70 = overbought (bearish), RSI < 30 = oversold (bullish)
+  // Mapear a señal: -0.5 (bearish) a +0.5 (bullish)
+  const rsiSignal = -(rsi - 50) / 100;
+
+  // ── 2. Momentum multi-ventana ponderado
+  const mom1m  = getMomentum(60);
+  const mom5m  = getMomentum(300);
+  const mom15m = getMomentum(900);
+  const mom1h  = getMomentum(3600);
+
+  // Ponderar: mayor peso a 5m y 15m (señal principal)
+  const momRaw = (mom1m * 0.15) + (mom5m * 0.35) + (mom15m * 0.35) + (mom1h * 0.15);
+  // Escalar: un movimiento de 0.1% (~$70 en BTC) es significativo en 5 min
+  const momSignal = Math.max(-0.4, Math.min(0.4, momRaw * 15));
+
+  // ── 3. Breakout detection (Bollinger-style)
+  const breakout = detectBreakout();
+  const breakoutSignal = breakout * 0.3;
+
+  // ── 4. Sentimiento de noticias (modificador suave)
+  const sentSignal = (state.newsSentiment || 0) * 0.05;
+
+  // ── Volatilidad realizada (para display)
+  const volPerSec = calcRealizedVol(120);
   state.impliedVol = Math.min(volPerSec * Math.sqrt(365.25 * 24 * 3600), 3.0);
 
-  // ── Señal 3: Mean reversion — si subió mucho en 5min, tiende a corregir
-  const lookback5m = Math.min(300, Math.floor(dataSpanSec));
-  const price5mAgo = priceAtTime(hist, now - lookback5m * 1000);
-  const priceNow = state.btcPrice;
-  const change5m = (price5mAgo && price5mAgo > 0)
-    ? (priceNow - price5mAgo) / price5mAgo
-    : momentum;
-  const reversionSignal = -change5m * 0.3;
+  // ── Combinar señales
+  const raw = (rsiSignal * 0.20) + (momSignal * 0.45) + (breakoutSignal * 0.25) + (sentSignal * 0.10);
 
-  // ── Combinar señales con pesos
-  const rawSignal = (momentum * 0.5) + (reversionSignal * 0.5);
-
-  // ── Normalizar por vol de 5 minutos
-  const vol5min = Math.max(volPerSec * Math.sqrt(300), 0.0005);
-  const zScore  = rawSignal / vol5min;
-
-  // Clamp conservador: máximo ±1.5 desv estándar
-  const zClamped = Math.max(-1.5, Math.min(1.5, zScore));
-  const prob = normalCDF(zClamped * 0.35);
-
-  // Rango realista para 5 minutos: 38%-62%
-  return Math.max(0.38, Math.min(0.62, prob));
+  // Mapear a probabilidad con rango útil: 25%-75%
+  const prob = 0.5 + Math.max(-0.25, Math.min(0.25, raw));
+  return prob;
 }
 
 // CDF normal estándar (aproximación Abramowitz & Stegun)
@@ -1450,7 +1515,7 @@ function updateDivergenceDisplay() {
   fill.style.width = meterPct + '%';
 
   // Color del meter
-  if (Math.abs(divergencia) < 0.05) {
+  if (Math.abs(divergencia) < 0.03) {
     fill.style.background = 'var(--yellow)';
   } else if (divergencia > 0) {
     fill.style.background = 'var(--green)';
@@ -1461,10 +1526,10 @@ function updateDivergenceDisplay() {
   // EV badge
   const evBadge = $('ev-badge');
   const evPct = (ev * 100).toFixed(1);
-  if (Math.abs(divergencia) < 0.05) {
+  if (Math.abs(divergencia) < 0.03) {
     evBadge.textContent = `EV: ~0% (neutral)`;
     evBadge.className = 'ev-badge neutral';
-  } else if (divergencia > 0.05) {
+  } else if (divergencia > 0.03) {
     evBadge.textContent = `EV: +${evPct}% → Comprar SÍ`;
     evBadge.className = 'ev-badge positive';
   } else {
@@ -1478,7 +1543,7 @@ function updateDivergenceDisplay() {
   const signalDesc  = $('signal-desc');
   const signalIcon  = $('signal-icon');
 
-  const MIN_EDGE = 0.07;  // 7% mínimo para señal
+  const MIN_EDGE = 0.03;  // 3% mínimo para señal
 
   if (Math.abs(divergencia) < MIN_EDGE) {
     signalBox.className   = 'signal-box neutral';
@@ -1515,7 +1580,7 @@ function logToHistory() {
     ? (Math.abs(div) / (div > 0 ? (1 - poly) : poly) * 100).toFixed(1) + '%'
     : '~0%';
 
-  const signal = Math.abs(div) < 0.07 ? 'watch'
+  const signal = Math.abs(div) < 0.03 ? 'watch'
                : div > 0              ? 'buy'
                :                        'sell';
 
@@ -1596,8 +1661,8 @@ function analyzeTimeframe(tf) {
   const strength = Math.min(1, Math.abs(zScore) / 2);
 
   let signal = 'wait';
-  if (zScore > 0.5) signal = 'bullish';
-  else if (zScore < -0.5) signal = 'bearish';
+  if (zScore > 0.3) signal = 'bullish';
+  else if (zScore < -0.3) signal = 'bearish';
 
   return { signal, strength, momentum, vol: vol * Math.sqrt(365.25*24*3600), zScore };
 }
@@ -1897,6 +1962,19 @@ setInterval(() => {
 }, 1000);
 
 // ─── Init ─────────────────────────────────────────────────────────
+// Restaurar historial de precios desde sessionStorage
+try {
+  const saved = sessionStorage.getItem('btcHistory');
+  if (saved) {
+    const parsed = JSON.parse(saved);
+    const cutoff = Date.now() - 3600000;
+    state.btcPriceHistory = parsed.filter(p => p.ts > cutoff);
+    if (state.btcPriceHistory.length > 0) {
+      console.log(`[init] Restaurados ${state.btcPriceHistory.length} puntos de precio desde sessionStorage`);
+    }
+  }
+} catch(e) { /* ignore */ }
+
 setStatus('Conectando a Binance...', 'yellow');
 connectBinanceWS();
 
