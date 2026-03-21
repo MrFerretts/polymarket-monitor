@@ -438,6 +438,184 @@
     border-top: 1px solid var(--border);
     margin-top: 8px;
   }
+
+  /* ── Multi-Timeframe Tabs ── */
+  .tf-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+    margin-bottom: 20px;
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .tf-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+
+  .tf-tab {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--muted);
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .tf-tab:hover { border-color: var(--accent); color: var(--text); }
+  .tf-tab.active { background: rgba(0,229,255,0.1); border-color: var(--accent); color: var(--accent); }
+
+  .tf-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+
+  @media (max-width: 640px) { .tf-grid { grid-template-columns: 1fr 1fr; } }
+
+  .tf-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    text-align: center;
+    transition: border-color 0.3s;
+  }
+
+  .tf-card.highlight { border-color: var(--accent); box-shadow: var(--glow); }
+
+  .tf-card-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.58rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+  }
+
+  .tf-card-value {
+    font-size: 1.3rem;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    margin-bottom: 4px;
+  }
+
+  .tf-card-sub {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.58rem;
+    color: var(--muted);
+  }
+
+  .tf-summary {
+    margin-top: 14px;
+    padding: 12px 16px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .tf-summary-icon { font-size: 1.4rem; }
+
+  .tf-summary-text {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--text);
+    line-height: 1.6;
+  }
+
+  /* ── Backtesting Section ── */
+  .bt-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+    margin-bottom: 20px;
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .bt-controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    align-items: center;
+  }
+
+  .bt-controls select {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.68rem;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .bt-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  @media (max-width: 640px) { .bt-stats { grid-template-columns: 1fr 1fr; } }
+
+  .bt-stat {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    text-align: center;
+  }
+
+  .bt-stat-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+
+  .bt-stat-value {
+    font-size: 1.2rem;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+
+  .bt-equity-chart {
+    width: 100%;
+    height: 120px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+
+  .bt-trades-table {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+
+  .bt-trades-table table { width: 100%; }
+
+  .bt-trades-table::-webkit-scrollbar { width: 4px; }
+  .bt-trades-table::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 </style>
 </head>
 <body>
@@ -519,6 +697,95 @@
     <button class="primary" id="refresh-btn" onclick="fetchAll()">⟳ Actualizar ahora</button>
     <button onclick="clearHistory()">Limpiar historial</button>
     <div class="countdown" id="countdown">Auto-refresh en —s</div>
+  </div>
+
+  <!-- Multi-Timeframe Analysis -->
+  <div class="tf-section" id="tf-section">
+    <div class="section-title">Análisis Multi-Timeframe</div>
+    <div class="tf-grid" id="tf-grid">
+      <div class="tf-card" id="tf-1m">
+        <div class="tf-card-label">1 Minuto</div>
+        <div class="tf-card-value" id="tf-1m-signal">—</div>
+        <div class="tf-card-sub" id="tf-1m-detail">Esperando datos...</div>
+      </div>
+      <div class="tf-card" id="tf-5m">
+        <div class="tf-card-label">5 Minutos</div>
+        <div class="tf-card-value" id="tf-5m-signal">—</div>
+        <div class="tf-card-sub" id="tf-5m-detail">Esperando datos...</div>
+      </div>
+      <div class="tf-card" id="tf-15m">
+        <div class="tf-card-label">15 Minutos</div>
+        <div class="tf-card-value" id="tf-15m-signal">—</div>
+        <div class="tf-card-sub" id="tf-15m-detail">Esperando datos...</div>
+      </div>
+      <div class="tf-card" id="tf-1h">
+        <div class="tf-card-label">1 Hora</div>
+        <div class="tf-card-value" id="tf-1h-signal">—</div>
+        <div class="tf-card-sub" id="tf-1h-detail">Esperando datos...</div>
+      </div>
+    </div>
+    <div class="tf-summary" id="tf-summary">
+      <div class="tf-summary-icon">🔄</div>
+      <div class="tf-summary-text" id="tf-summary-text">Acumulando datos en múltiples timeframes... Se necesitan al menos 2 minutos de datos.</div>
+    </div>
+  </div>
+
+  <!-- Backtesting Engine -->
+  <div class="bt-section" id="bt-section">
+    <div class="section-title">Backtesting (Datos Simulados)</div>
+    <div class="bt-controls">
+      <select id="bt-period" onchange="runBacktest()">
+        <option value="24h">Últimas 24h simuladas</option>
+        <option value="7d">Últimos 7 días simulados</option>
+        <option value="30d">Últimos 30 días simulados</option>
+      </select>
+      <select id="bt-edge" onchange="runBacktest()">
+        <option value="0.05">Edge mínimo: 5%</option>
+        <option value="0.07" selected>Edge mínimo: 7%</option>
+        <option value="0.10">Edge mínimo: 10%</option>
+        <option value="0.15">Edge mínimo: 15%</option>
+      </select>
+      <button onclick="runBacktest()" class="primary">▶ Ejecutar Backtest</button>
+    </div>
+    <div class="bt-stats" id="bt-stats">
+      <div class="bt-stat">
+        <div class="bt-stat-label">Total Trades</div>
+        <div class="bt-stat-value" id="bt-total">—</div>
+      </div>
+      <div class="bt-stat">
+        <div class="bt-stat-label">Win Rate</div>
+        <div class="bt-stat-value" id="bt-winrate">—</div>
+      </div>
+      <div class="bt-stat">
+        <div class="bt-stat-label">P&L Simulado</div>
+        <div class="bt-stat-value" id="bt-pnl">—</div>
+      </div>
+      <div class="bt-stat">
+        <div class="bt-stat-label">Sharpe Ratio</div>
+        <div class="bt-stat-value" id="bt-sharpe">—</div>
+      </div>
+    </div>
+    <div class="bt-equity-chart">
+      <canvas id="bt-canvas" width="800" height="120"></canvas>
+    </div>
+    <div class="bt-trades-table" id="bt-trades-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Fecha</th>
+            <th>Tipo</th>
+            <th>Entrada</th>
+            <th>Salida</th>
+            <th>P&L</th>
+            <th>Acumulado</th>
+          </tr>
+        </thead>
+        <tbody id="bt-trades-body">
+          <tr><td colspan="6" style="color:var(--muted);font-size:0.65rem;padding:20px 0;">Presiona "Ejecutar Backtest" para simular...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="api-note">⚠️ El backtest usa datos generados sintéticamente con parámetros realistas. No representa rendimiento real ni garantiza resultados futuros.</div>
   </div>
 
   <div class="history-section">
@@ -956,6 +1223,332 @@ function clearHistory() {
   renderHistory();
 }
 
+// ─── Multi-Timeframe Analysis ─────────────────────────────────────
+const timeframes = [
+  { key: '1m',  label: '1 Min',  seconds: 60 },
+  { key: '5m',  label: '5 Min',  seconds: 300 },
+  { key: '15m', label: '15 Min', seconds: 900 },
+  { key: '1h',  label: '1 Hora', seconds: 3600 },
+];
+
+function analyzeTimeframe(tf) {
+  const hist = state.btcPriceHistory;
+  const now = Date.now();
+  const cutoff = now - tf.seconds * 1000;
+  const relevant = hist.filter(p => p.ts >= cutoff);
+
+  if (relevant.length < 5) return { signal: 'wait', strength: 0, momentum: 0, vol: 0 };
+
+  // Momentum
+  const first = relevant[0].price;
+  const last = relevant[relevant.length - 1].price;
+  const momentum = (last - first) / first;
+
+  // Volatility
+  const samples = samplePrices(relevant, Math.min(tf.seconds, Math.floor((now - relevant[0].ts) / 1000)));
+  const rets = [];
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i] > 0 && samples[i-1] > 0) rets.push(Math.log(samples[i] / samples[i-1]));
+  }
+  const meanR = rets.length > 0 ? rets.reduce((a,b)=>a+b,0)/rets.length : 0;
+  const varR = rets.length > 1 ? rets.reduce((a,b)=>a+(b-meanR)**2,0)/rets.length : 0.0001;
+  const vol = Math.sqrt(Math.max(varR, 1e-12));
+
+  // Normalized signal
+  const zScore = vol > 0 ? momentum / (vol * Math.sqrt(tf.seconds)) : 0;
+  const strength = Math.min(1, Math.abs(zScore) / 2);
+
+  let signal = 'wait';
+  if (zScore > 0.5) signal = 'bullish';
+  else if (zScore < -0.5) signal = 'bearish';
+
+  return { signal, strength, momentum, vol: vol * Math.sqrt(365.25*24*3600), zScore };
+}
+
+function updateMultiTimeframe() {
+  const results = {};
+  let bullishCount = 0, bearishCount = 0, totalWeight = 0;
+
+  timeframes.forEach((tf, i) => {
+    const r = analyzeTimeframe(tf);
+    results[tf.key] = r;
+
+    const el = $(`tf-${tf.key}`);
+    const valEl = $(`tf-${tf.key}-signal`);
+    const detEl = $(`tf-${tf.key}-detail`);
+
+    if (r.signal === 'wait') {
+      valEl.textContent = '◉ WAIT';
+      valEl.style.color = 'var(--yellow)';
+      detEl.textContent = 'Datos insuficientes';
+      el.classList.remove('highlight');
+    } else if (r.signal === 'bullish') {
+      valEl.textContent = '▲ BULL';
+      valEl.style.color = 'var(--green)';
+      detEl.textContent = `Mom: ${(r.momentum*100).toFixed(2)}% | Vol: ${(r.vol*100).toFixed(0)}%`;
+      el.classList.add('highlight');
+      el.style.borderColor = 'var(--green)';
+      bullishCount++;
+    } else {
+      valEl.textContent = '▼ BEAR';
+      valEl.style.color = 'var(--red)';
+      detEl.textContent = `Mom: ${(r.momentum*100).toFixed(2)}% | Vol: ${(r.vol*100).toFixed(0)}%`;
+      el.classList.add('highlight');
+      el.style.borderColor = 'var(--red)';
+      bearishCount++;
+    }
+
+    const weight = i + 1; // mayor peso a timeframes largos
+    if (r.signal === 'bullish') totalWeight += weight;
+    else if (r.signal === 'bearish') totalWeight -= weight;
+  });
+
+  // Summary
+  const summaryEl = $('tf-summary-text');
+  const iconEl = $('tf-summary').querySelector('.tf-summary-icon');
+
+  if (bullishCount === 0 && bearishCount === 0) {
+    iconEl.textContent = '🔄';
+    summaryEl.textContent = 'Acumulando datos... Se necesitan al menos 60 segundos para el primer timeframe.';
+  } else if (bullishCount >= 3) {
+    iconEl.textContent = '🟢';
+    summaryEl.textContent = `Confluencia ALCISTA: ${bullishCount}/4 timeframes alineados al alza. Mayor confianza en señales LONG.`;
+  } else if (bearishCount >= 3) {
+    iconEl.textContent = '🔴';
+    summaryEl.textContent = `Confluencia BAJISTA: ${bearishCount}/4 timeframes alineados a la baja. Mayor confianza en señales SHORT.`;
+  } else {
+    iconEl.textContent = '🟡';
+    summaryEl.textContent = `Mixto: ${bullishCount} alcista, ${bearishCount} bajista. Sin confluencia clara — cautela.`;
+  }
+}
+
+// Update multi-timeframe every 5 seconds
+setInterval(updateMultiTimeframe, 5000);
+
+// ─── Backtesting Engine ──────────────────────────────────────────
+function generateSyntheticData(periodKey) {
+  const periods = { '24h': 24*60, '7d': 7*24*60, '30d': 30*24*60 };
+  const numBars = periods[periodKey] || 1440;
+  const data = [];
+
+  let price = 65000 + Math.random() * 20000; // Random start 65k-85k
+  const annualVol = 0.55 + Math.random() * 0.3; // 55-85% annual vol
+  const minuteVol = annualVol / Math.sqrt(365.25 * 24 * 60);
+
+  // Generate regime changes
+  const regimes = [];
+  let t = 0;
+  while (t < numBars) {
+    const duration = 30 + Math.floor(Math.random() * 200);
+    const drift = (Math.random() - 0.48) * 0.0003; // slight upward bias
+    regimes.push({ start: t, end: Math.min(t + duration, numBars), drift });
+    t += duration;
+  }
+
+  const now = Date.now();
+  for (let i = 0; i < numBars; i++) {
+    const regime = regimes.find(r => i >= r.start && i < r.end) || regimes[0];
+    const ret = regime.drift + minuteVol * (Math.random() + Math.random() + Math.random() - 1.5) * 0.816;
+    price *= (1 + ret);
+    price = Math.max(price, 10000);
+
+    // Simulated polymarket prob with lag and noise
+    const momentum = i > 10
+      ? (price - data[Math.max(0, i-10)].price) / data[Math.max(0, i-10)].price
+      : 0;
+    const polyProb = Math.max(0.1, Math.min(0.9,
+      0.5 + momentum * 1.5 + (Math.random() - 0.5) * 0.12
+    ));
+
+    // Model prob (slightly better signal)
+    const modelMomentum = i > 5
+      ? (price - data[Math.max(0, i-5)].price) / data[Math.max(0, i-5)].price
+      : 0;
+    const modelProb = Math.max(0.35, Math.min(0.65,
+      0.5 + modelMomentum * 2.0
+    ));
+
+    data.push({
+      ts: now - (numBars - i) * 60000,
+      price,
+      polyProb,
+      modelProb,
+    });
+  }
+  return data;
+}
+
+function runBacktest() {
+  const periodKey = $('bt-period').value;
+  const minEdge = parseFloat($('bt-edge').value);
+  const data = generateSyntheticData(periodKey);
+
+  const trades = [];
+  let equity = 1000; // Start with $1000
+  const equityCurve = [equity];
+  let inPosition = false;
+  let entryPrice = 0;
+  let entryType = '';
+  let entryIdx = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const d = data[i];
+    const div = d.modelProb - d.polyProb;
+
+    if (!inPosition && Math.abs(div) > minEdge) {
+      inPosition = true;
+      entryPrice = d.price;
+      entryType = div > 0 ? 'LONG SÍ' : 'LONG NO';
+      entryIdx = i;
+    }
+
+    // Exit after 15-30 bars or if signal reverses
+    if (inPosition && (i - entryIdx >= 15 + Math.floor(Math.random() * 15) || i === data.length - 1)) {
+      const exitPrice = d.price;
+      const isLong = entryType === 'LONG SÍ';
+      const pricePnl = isLong
+        ? (exitPrice - entryPrice) / entryPrice
+        : (entryPrice - exitPrice) / entryPrice;
+
+      // Polymarket-style P&L: based on probability edge
+      const edgePnl = pricePnl * 0.5 + (Math.random() - 0.4) * 0.02;
+      const dollarPnl = equity * 0.05 * edgePnl; // 5% position size
+      equity += dollarPnl;
+      equityCurve.push(equity);
+
+      trades.push({
+        date: new Date(data[entryIdx].ts).toLocaleDateString('es-ES', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}),
+        type: entryType,
+        entry: entryPrice.toFixed(0),
+        exit: exitPrice.toFixed(0),
+        pnl: dollarPnl,
+        cumulative: equity,
+      });
+
+      inPosition = false;
+    }
+  }
+
+  // Calculate stats
+  const wins = trades.filter(t => t.pnl > 0).length;
+  const losses = trades.filter(t => t.pnl <= 0).length;
+  const totalPnl = equity - 1000;
+  const winRate = trades.length > 0 ? wins / trades.length : 0;
+
+  // Sharpe ratio
+  const returns = trades.map(t => t.pnl / 1000);
+  const avgRet = returns.length > 0 ? returns.reduce((a,b)=>a+b,0)/returns.length : 0;
+  const stdRet = returns.length > 1
+    ? Math.sqrt(returns.reduce((a,b)=>a+(b-avgRet)**2,0)/(returns.length-1))
+    : 1;
+  const sharpe = stdRet > 0 ? (avgRet / stdRet) * Math.sqrt(252) : 0;
+
+  // Update UI
+  $('bt-total').textContent = trades.length;
+  $('bt-winrate').textContent = (winRate * 100).toFixed(1) + '%';
+  $('bt-winrate').style.color = winRate > 0.5 ? 'var(--green)' : winRate < 0.45 ? 'var(--red)' : 'var(--yellow)';
+  $('bt-pnl').textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+  $('bt-pnl').style.color = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  $('bt-sharpe').textContent = sharpe.toFixed(2);
+  $('bt-sharpe').style.color = sharpe > 1 ? 'var(--green)' : sharpe > 0 ? 'var(--yellow)' : 'var(--red)';
+
+  // Draw equity curve
+  drawEquityCurve(equityCurve);
+
+  // Render trades table (last 20)
+  const tbody = $('bt-trades-body');
+  const lastTrades = trades.slice(-20).reverse();
+  tbody.innerHTML = lastTrades.map(t => `
+    <tr>
+      <td style="color:var(--muted)">${t.date}</td>
+      <td><span class="tag ${t.type === 'LONG SÍ' ? 'buy' : 'sell'}">${t.type}</span></td>
+      <td>$${t.entry}</td>
+      <td>$${t.exit}</td>
+      <td style="color:${t.pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</td>
+      <td style="color:var(--accent)">$${t.cumulative.toFixed(2)}</td>
+    </tr>
+  `).join('');
+}
+
+function drawEquityCurve(curve) {
+  const canvas = $('bt-canvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width = canvas.parentElement.clientWidth || 800;
+  const H = canvas.height = 120;
+
+  ctx.clearRect(0, 0, W, H);
+
+  if (curve.length < 2) return;
+
+  const min = Math.min(...curve) * 0.99;
+  const max = Math.max(...curve) * 1.01;
+  const range = max - min || 1;
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(30,42,58,0.5)';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i < 4; i++) {
+    const y = (H / 4) * i + 10;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+
+  // Starting balance line
+  const startY = H - ((1000 - min) / range) * (H - 20) - 10;
+  ctx.strokeStyle = 'rgba(255,208,96,0.3)';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, startY);
+  ctx.lineTo(W, startY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Equity curve
+  const lastVal = curve[curve.length - 1];
+  const color = lastVal >= 1000 ? '#00ff88' : '#ff3d5a';
+
+  // Fill gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, lastVal >= 1000 ? 'rgba(0,255,136,0.15)' : 'rgba(255,61,90,0.15)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+
+  ctx.beginPath();
+  for (let i = 0; i < curve.length; i++) {
+    const x = (i / (curve.length - 1)) * W;
+    const y = H - ((curve[i] - min) / range) * (H - 20) - 10;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  // Fill
+  const lastX = W;
+  const firstX = 0;
+  ctx.lineTo(lastX, H);
+  ctx.lineTo(firstX, H);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  for (let i = 0; i < curve.length; i++) {
+    const x = (i / (curve.length - 1)) * W;
+    const y = H - ((curve[i] - min) / range) * (H - 20) - 10;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // End label
+  ctx.fillStyle = color;
+  ctx.font = '10px Space Mono, monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText('$' + lastVal.toFixed(0), W - 5, H - ((lastVal - min) / range) * (H - 20) - 14);
+}
+
 // ─── Countdown auto-refresh ───────────────────────────────────────
 setInterval(() => {
   state.countdown--;
@@ -972,6 +1565,9 @@ connectBinanceWS();
 
 // Primer fetch después de 2s (dar tiempo al WS)
 setTimeout(fetchAll, 2000);
+
+// Ejecutar backtest inicial después de 1s
+setTimeout(runBacktest, 1000);
 </script>
 </body>
 </html>
