@@ -4,6 +4,7 @@ FastAPI backend — corre en Railway sin problemas de CORS
 """
 import asyncio
 import json
+import time
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -53,6 +54,7 @@ async def fetch_polymarket_loop():
                 pool = btc if btc else markets[:5]
                 pool.sort(key=lambda m: float(m.get("volume") or 0), reverse=True)
 
+                found = False
                 for m in pool:
                     price = None
                     if m.get("outcomePrices"):
@@ -64,14 +66,24 @@ async def fetch_polymarket_loop():
                         except Exception:
                             pass
                     if not price or not (0.01 < price < 0.99):
-                        price = float(m.get("lastTradePrice") or m.get("bestBid") or 0)
+                        try:
+                            price = float(m.get("lastTradePrice") or m.get("bestBid") or 0)
+                        except (TypeError, ValueError):
+                            price = 0
                     if price and 0.01 < price < 0.99:
                         state["polyProb"] = price
                         label = (m.get("question") or m.get("title") or "BTC market")[:60]
                         state["polyMarket"] = label
-                        state["lastPolyUpdate"] = asyncio.get_event_loop().time()
+                        state["lastPolyUpdate"] = time.time()
                         state["error"] = None
+                        found = True
                         break
+
+                # Si no se encontró mercado válido, marcar como stale después de 5 min
+                if not found and state["lastPolyUpdate"]:
+                    if time.time() - state["lastPolyUpdate"] > 300:
+                        state["polyProb"] = None
+                        state["error"] = "No se encontró mercado BTC válido en Polymarket"
 
         except Exception as e:
             state["error"] = str(e)
@@ -104,6 +116,7 @@ async def get_polymarket():
         "prob": state["polyProb"],
         "market": state["polyMarket"],
         "error": state["error"],
+        "updatedAt": state["lastPolyUpdate"],
     })
 
 
