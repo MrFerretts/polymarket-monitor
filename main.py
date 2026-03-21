@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from xml.etree import ElementTree
 
 import httpx
@@ -205,13 +206,20 @@ async def fetch_btc_markets(client: httpx.AsyncClient) -> list[dict]:
         if not markets:
             break
 
+        now = datetime.now(timezone.utc)
         for m in markets:
-            if is_btc_directional(m):
-                all_btc.append(m)
-
-        # Si ya encontramos mercados BTC, no seguir paginando
-        if all_btc:
-            break
+            if not is_btc_directional(m):
+                continue
+            # Filtrar mercados cuya ventana ya expiró
+            end = m.get("endDate")
+            if end:
+                try:
+                    end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                    if end_dt <= now:
+                        continue
+                except ValueError:
+                    pass
+            all_btc.append(m)
 
         offset += limit
 
@@ -226,7 +234,7 @@ async def fetch_polymarket_loop():
                 btc_markets = await fetch_btc_markets(client)
 
                 pool = btc_markets if btc_markets else []
-                pool.sort(key=lambda m: float(m.get("volume") or 0), reverse=True)
+                pool.sort(key=lambda m: m.get("endDate") or "9999")  # soonest first
 
                 found = False
                 for m in pool:
