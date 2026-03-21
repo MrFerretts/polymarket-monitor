@@ -128,12 +128,13 @@
   /* Main price cards */
   .price-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
     gap: 14px;
     margin-bottom: 20px;
   }
 
-  @media (max-width: 640px) { .price-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .price-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 500px) { .price-grid { grid-template-columns: 1fr; } }
 
   .card {
     background: var(--surface);
@@ -751,6 +752,40 @@
   .spread-indicator.tight { background: rgba(0,255,136,0.1); color: var(--green); }
   .spread-indicator.medium { background: rgba(255,208,96,0.1); color: var(--yellow); }
   .spread-indicator.wide { background: rgba(255,61,90,0.1); color: var(--red); }
+
+  /* ── IA Forecast card ── */
+  .card.ai-card::before {
+    background: linear-gradient(90deg, transparent, #a78bfa, transparent);
+  }
+
+  .ai-reasoning {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.58rem;
+    color: var(--muted);
+    line-height: 1.5;
+    margin-top: 6px;
+    max-height: 40px;
+    overflow: hidden;
+  }
+
+  .confidence-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 4px;
+  }
+
+  .confidence-dot.alta { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .confidence-dot.media { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+  .confidence-dot.baja { background: var(--red); box-shadow: 0 0 6px var(--red); }
+
+  .ai-disabled {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--muted);
+    line-height: 1.5;
+  }
 </style>
 </head>
 <body>
@@ -797,11 +832,20 @@
     </div>
 
     <div class="card" id="card-model">
-      <div class="card-label">Prob. Modelo (BS + Vol)</div>
+      <div class="card-label">Prob. Modelo (Momentum)</div>
       <div class="card-value" id="model-prob">—</div>
       <div class="card-sub">
         Vol implícita: <span id="impl-vol">—</span>
       </div>
+    </div>
+
+    <div class="card ai-card" id="card-ai">
+      <div class="card-label">IA Forecast · Groq</div>
+      <div class="card-value" id="ai-prob">—</div>
+      <div class="card-sub" id="ai-confidence">
+        <span class="confidence-dot media"></span> Esperando...
+      </div>
+      <div class="ai-reasoning" id="ai-reasoning"></div>
     </div>
   </div>
 
@@ -1175,6 +1219,36 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// ─── IA Forecast ────────────────────────────────────────────────
+async function fetchForecast() {
+  try {
+    const res = await fetch('/api/forecast', { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return;
+    const data = await res.json();
+
+    if (!data.enabled) {
+      $('ai-prob').textContent = '—';
+      $('ai-prob').style.color = 'var(--muted)';
+      $('ai-confidence').innerHTML = '<span class="ai-disabled">GROQ_API_KEY no configurada</span>';
+      $('ai-reasoning').textContent = '';
+      return;
+    }
+
+    if (data.probability != null) {
+      $('ai-prob').textContent = (data.probability * 100).toFixed(1) + '%';
+      $('ai-prob').style.color = '#a78bfa';
+
+      const conf = data.confidence || 'media';
+      $('ai-confidence').innerHTML = `<span class="confidence-dot ${conf}"></span> Confianza: ${conf}`;
+      $('ai-reasoning').textContent = data.reasoning || '';
+      state.aiForecast = data.probability;
+    } else {
+      $('ai-prob').textContent = '...';
+      $('ai-confidence').innerHTML = '<span class="confidence-dot media"></span> Calculando...';
+    }
+  } catch(e) { console.warn('Forecast fetch:', e.message); }
+}
+
 function simulatePolyProb() {
   if (!state.btcChange1h) return 0.50;
   const base  = 0.50 + state.btcChange1h * 2.5;
@@ -1311,10 +1385,11 @@ async function fetchAll() {
   $('refresh-btn').innerHTML = '<span class="spin">⟳</span> Actualizando...';
 
   try {
-    // Fetch polymarket y noticias en paralelo
+    // Fetch polymarket, noticias y forecast en paralelo
     const [polyProb] = await Promise.all([
       fetchPolymarketProb(),
       fetchNews(),
+      fetchForecast(),
     ]);
     state.polyProb = polyProb;
     state.modelProb = calcModelProb();
@@ -1325,7 +1400,7 @@ async function fetchAll() {
     logToHistory();
 
     // Flash en cards
-    ['card-btc','card-poly','card-model','div-section'].forEach(id => {
+    ['card-btc','card-poly','card-model','card-ai','div-section'].forEach(id => {
       const el = $(id);
       el.classList.remove('flash');
       void el.offsetWidth;
@@ -1414,14 +1489,16 @@ function updateDivergenceDisplay() {
     signalBox.className   = 'signal-box bullish';
     signalIcon.textContent = '📈';
     signalTitle.textContent = `Señal LONG SÍ — Modelo sugiere ${fmtPct(model)}, mercado cotiza ${fmtPct(poly)}`;
+    const aiRef1 = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
     signalDesc.textContent  = `El mercado podría estar subvalorando la probabilidad de subida. ` +
-      `EV estimado: +${evPct}% por dólar. Edge: ${(divergencia*100).toFixed(1)}%. ` +
+      `EV estimado: +${evPct}% por dólar. Edge: ${(divergencia*100).toFixed(1)}%.${aiRef1} ` +
       `[PAPER MODE — no se ejecuta ningún trade]`;
   } else {
     signalBox.className   = 'signal-box bearish';
     signalIcon.textContent = '📉';
     signalTitle.textContent = `Señal LONG NO — Mercado sobrevalora subida en ${(Math.abs(divergencia)*100).toFixed(1)}%`;
-    signalDesc.textContent  = `Polymarket asigna ${fmtPct(poly)} pero modelo estima ${fmtPct(model)}. ` +
+    const aiRef2 = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
+    signalDesc.textContent  = `Polymarket asigna ${fmtPct(poly)} pero modelo estima ${fmtPct(model)}.${aiRef2} ` +
       `EV estimado comprando NO: +${evPct}%. ` +
       `[PAPER MODE — no se ejecuta ningún trade]`;
   }
