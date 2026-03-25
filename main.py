@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -688,6 +689,172 @@ async def get_klines(interval: str = "1m", limit: int = 500):
             return JSONResponse(res.json())
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=502)
+
+
+# ─── Signal logging para calibración ──────────────────────────────
+SIGNALS_DB = os.getenv("SIGNALS_DB", "signals.db")
+
+
+def _init_db():
+    conn = sqlite3.connect(SIGNALS_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        flow REAL, cvd REAL, ob REAL, liq REAL, mom REAL,
+        funding REAL, regime REAL, spread_disc REAL,
+        model_prob REAL,
+        btc_price REAL,
+        outcome INTEGER DEFAULT -1,
+        outcome_price REAL DEFAULT NULL
+    )""")
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_ts ON signals(ts)""")
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_outcome ON signals(outcome)""")
+    conn.commit()
+    conn.close()
+
+
+_init_db()
+
+
+@app.post("/api/log_signal")
+async def log_signal_handler(request):
+    """Guarda señal + outcome para calibración futura."""
+    try:
+        data = await request.json()
+        conn = sqlite3.connect(SIGNALS_DB)
+        conn.execute(
+            """INSERT INTO signals (ts, flow, cvd, ob, liq, mom, funding,
+               regime, spread_disc, model_prob, btc_price, outcome, outcome_price)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                int(data.get("ts", time.time() * 1000)),
+                data.get("flow"),
+                data.get("cvd"),
+                data.get("ob"),
+                data.get("liq"),
+                data.get("mom"),
+                data.get("funding"),
+                data.get("regime"),
+                data.get("spreadDisc"),
+                data.get("modelProb"),
+                data.get("btcPrice"),
+                data.get("outcome", -1),
+                data.get("outcomePrice"),
+            ),
+        )
+        conn.commit()
+        count = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+        conn.close()
+        return JSONResponse({"ok": True, "totalRecords": count})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.post("/api/log_outcome")
+async def log_outcome(request):
+    """Actualiza el outcome de una señal registrada hace ~5 min."""
+    try:
+        data = await request.json()
+        ts = int(data["ts"])
+        outcome = int(data["outcome"])  # 1 = acertó, 0 = falló
+        outcome_price = float(data.get("outcomePrice", 0))
+
+        conn = sqlite3.connect(SIGNALS_DB)
+        conn.execute(
+            """UPDATE signals SET outcome = ?, outcome_price = ?
+               WHERE ts = ? AND outcome = -1""",
+            (outcome, outcome_price, ts),
+        )
+        conn.commit()
+        conn.close()
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@app.get("/api/calibration")
+async def get_calibration():
+    """Estadísticas de calibración del modelo basadas en datos reales."""
+    try:
+        conn = sqlite3.connect(SIGNALS_DB)
+        total = conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+        with_outcome = conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE outcome >= 0"
+        ).fetchone()[0]
+
+        if with_outcome < 10:
+            conn.close()
+            return JSONResponse({
+                "status": "insufficient_data",
+                "totalSignals": total,
+                "withOutcome": with_outcome,
+                "message": f"Necesitas al menos 10 señales con outcome. Tienes {with_outcome}.",
+            })
+
+        # Win rate por rango de confianza
+        rows = conn.execute(
+            """SELECT model_prob, outcome, flow, cvd, ob, liq, mom
+               FROM signals WHERE outcome >= 0"""
+        ).fetchall()
+        conn.close()
+
+        # Calcular stats
+        wins = sum(1 for r in rows if r[1] == 1)
+        total_outcomes = len(rows)
+        overall_wr = wins / total_outcomes if total_outcomes > 0 else 0
+
+        # Win rate por bucket de confianza
+        buckets = {"low": [], "med": [], "high": []}
+        for r in rows:
+            prob = r[0] or 0.5
+            conf = abs(prob - 0.5) * 2
+            if conf < 0.10:
+                buckets["low"].append(r[1])
+            elif conf < 0.20:
+                buckets["med"].append(r[1])
+            else:
+                buckets["high"].append(r[1])
+
+        bucket_stats = {}
+        for k, v in buckets.items():
+            if v:
+                bucket_stats[k] = {
+                    "count": len(v),
+                    "winRate": round(sum(v) / len(v), 3),
+                }
+            else:
+                bucket_stats[k] = {"count": 0, "winRate": None}
+
+        # Correlación simple de cada señal con outcome
+        signal_corr = {}
+        signal_names = ["flow", "cvd", "ob", "liq", "mom"]
+        for i, name in enumerate(signal_names):
+            vals = [(r[i + 2], r[1]) for r in rows if r[i + 2] is not None]
+            if len(vals) >= 10:
+                mean_sig = sum(v[0] for v in vals) / len(vals)
+                mean_out = sum(v[1] for v in vals) / len(vals)
+                cov = sum((v[0] - mean_sig) * (v[1] - mean_out) for v in vals) / len(vals)
+                std_sig = (sum((v[0] - mean_sig)**2 for v in vals) / len(vals)) ** 0.5
+                std_out = (sum((v[1] - mean_out)**2 for v in vals) / len(vals)) ** 0.5
+                if std_sig > 0 and std_out > 0:
+                    signal_corr[name] = round(cov / (std_sig * std_out), 3)
+                else:
+                    signal_corr[name] = 0
+            else:
+                signal_corr[name] = None
+
+        return JSONResponse({
+            "status": "ok",
+            "totalSignals": total,
+            "withOutcome": with_outcome,
+            "overallWinRate": round(overall_wr, 3),
+            "byConfidence": bucket_stats,
+            "signalCorrelation": signal_corr,
+            "message": f"Win rate: {overall_wr:.1%} sobre {with_outcome} señales.",
+        })
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/health")
