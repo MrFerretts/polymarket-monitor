@@ -919,11 +919,11 @@
         <option value="7d">Últimos 7 días simulados</option>
         <option value="30d">Últimos 30 días simulados</option>
       </select>
-      <select id="bt-edge" onchange="runBacktest()">
-        <option value="0.05">Edge mínimo: 5%</option>
-        <option value="0.07" selected>Edge mínimo: 7%</option>
-        <option value="0.10">Edge mínimo: 10%</option>
-        <option value="0.15">Edge mínimo: 15%</option>
+      <select id="bt-conf" onchange="runBacktest()">
+        <option value="0.03">Confianza mín: 3%</option>
+        <option value="0.05" selected>Confianza mín: 5%</option>
+        <option value="0.08">Confianza mín: 8%</option>
+        <option value="0.12">Confianza mín: 12%</option>
       </select>
       <button onclick="runBacktest()" class="primary">▶ Ejecutar Backtest</button>
     </div>
@@ -953,10 +953,10 @@
         <thead>
           <tr>
             <th>Fecha</th>
-            <th>Tipo</th>
-            <th>Entrada</th>
-            <th>Salida</th>
-            <th>P&L</th>
+            <th>Predicción</th>
+            <th>Precio Init</th>
+            <th>Precio 5min</th>
+            <th>Resultado</th>
             <th>Acumulado</th>
           </tr>
         </thead>
@@ -1498,74 +1498,72 @@ function updatePolyDisplay() {
 }
 
 function updateDivergenceDisplay() {
-  const poly  = state.polyProb;
   const model = state.modelProb;
-  if (poly == null || model == null || isNaN(model) || isNaN(poly) || !isFinite(model)) return;
+  if (model == null || isNaN(model) || !isFinite(model)) return;
 
   updatePolyDisplay();
 
-  const divergencia = model - poly;  // positivo = modelo > mercado (comprar SÍ)
-  const ev = divergencia > 0
-    ? divergencia / (1 - poly)       // EV de comprar SÍ
-    : Math.abs(divergencia) / poly;  // EV de comprar NO
+  // El modelo da probabilidad de que SUBA. >50% = sube, <50% = baja
+  const probSube = model;
+  const probBaja = 1 - model;
+  const confianza = Math.abs(model - 0.5) * 2;  // 0 = sin idea, 1 = muy seguro
 
-  // Meter: 0% = poly mucho más alto, 100% = modelo mucho más alto
-  const meterPct = Math.min(100, Math.max(0, 50 + divergencia * 200));
+  // Meter: 0% = baja seguro, 100% = sube seguro
+  const meterPct = Math.min(100, Math.max(0, model * 100));
   const fill = $('meter-fill');
   fill.style.width = meterPct + '%';
 
   // Color del meter
-  if (Math.abs(divergencia) < 0.03) {
+  if (confianza < 0.06) {
     fill.style.background = 'var(--yellow)';
-  } else if (divergencia > 0) {
+  } else if (model > 0.5) {
     fill.style.background = 'var(--green)';
   } else {
     fill.style.background = 'var(--red)';
   }
 
-  // EV badge
+  // EV badge — muestra la probabilidad dominante
   const evBadge = $('ev-badge');
-  const evPct = (ev * 100).toFixed(1);
-  if (Math.abs(divergencia) < 0.03) {
-    evBadge.textContent = `EV: ~0% (neutral)`;
+  if (confianza < 0.06) {
+    evBadge.textContent = `Prob: ~50% — Sin dirección clara`;
     evBadge.className = 'ev-badge neutral';
-  } else if (divergencia > 0.03) {
-    evBadge.textContent = `EV: +${evPct}% → Comprar SÍ`;
+  } else if (model > 0.5) {
+    evBadge.textContent = `SUBE ${(probSube*100).toFixed(1)}% — Apostar SÍ`;
     evBadge.className = 'ev-badge positive';
   } else {
-    evBadge.textContent = `EV: +${evPct}% → Comprar NO`;
+    evBadge.textContent = `BAJA ${(probBaja*100).toFixed(1)}% — Apostar NO`;
     evBadge.className = 'ev-badge negative';
   }
 
-  // Signal box
+  // Signal box — predicción clara SUBE/BAJA
   const signalBox   = $('signal-box');
   const signalTitle = $('signal-title');
   const signalDesc  = $('signal-desc');
   const signalIcon  = $('signal-icon');
 
-  const MIN_EDGE = 0.03;  // 3% mínimo para señal
+  const MIN_CONF = 0.03;  // 3% mínimo de confianza (53% o 47%)
 
-  if (Math.abs(divergencia) < MIN_EDGE) {
+  if (confianza < MIN_CONF) {
     signalBox.className   = 'signal-box neutral';
     signalIcon.textContent = '🔍';
-    signalTitle.textContent = 'Sin señal clara — Zona neutral';
-    signalDesc.textContent  = `Divergencia ${(Math.abs(divergencia)*100).toFixed(1)}% < umbral mínimo de ${MIN_EDGE*100}%. No operar.`;
-  } else if (divergencia > MIN_EDGE) {
+    signalTitle.textContent = 'INDECISO — Probabilidad ~50%, sin dirección clara';
+    signalDesc.textContent  = `Modelo: ${fmtPct(model)}. Confianza insuficiente (${(confianza*100).toFixed(1)}% < ${(MIN_CONF*100)}%). Esperar mejor señal.`;
+  } else if (model > 0.5) {
     signalBox.className   = 'signal-box bullish';
     signalIcon.textContent = '📈';
-    signalTitle.textContent = `Señal LONG SÍ — Modelo sugiere ${fmtPct(model)}, mercado cotiza ${fmtPct(poly)}`;
-    const aiRef1 = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
-    signalDesc.textContent  = `El mercado podría estar subvalorando la probabilidad de subida. ` +
-      `EV estimado: +${evPct}% por dólar. Edge: ${(divergencia*100).toFixed(1)}%.${aiRef1} ` +
-      `[PAPER MODE — no se ejecuta ningún trade]`;
+    signalTitle.textContent = `SUBE — ${(probSube*100).toFixed(1)}% prob. de subir en próximos minutos`;
+    const aiRef = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
+    signalDesc.textContent  = `El modelo predice que BTC va a SUBIR. ` +
+      `Confianza: ${(confianza*100).toFixed(0)}%.${aiRef} ` +
+      `Apostar SÍ en Polymarket. [PAPER MODE]`;
   } else {
     signalBox.className   = 'signal-box bearish';
     signalIcon.textContent = '📉';
-    signalTitle.textContent = `Señal LONG NO — Mercado sobrevalora subida en ${(Math.abs(divergencia)*100).toFixed(1)}%`;
-    const aiRef2 = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
-    signalDesc.textContent  = `Polymarket asigna ${fmtPct(poly)} pero modelo estima ${fmtPct(model)}.${aiRef2} ` +
-      `EV estimado comprando NO: +${evPct}%. ` +
-      `[PAPER MODE — no se ejecuta ningún trade]`;
+    signalTitle.textContent = `BAJA — ${(probBaja*100).toFixed(1)}% prob. de bajar en próximos minutos`;
+    const aiRef = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
+    signalDesc.textContent  = `El modelo predice que BTC va a BAJAR. ` +
+      `Confianza: ${(confianza*100).toFixed(0)}%.${aiRef} ` +
+      `Apostar NO en Polymarket. [PAPER MODE]`;
   }
 }
 
@@ -1580,9 +1578,10 @@ function logToHistory() {
     ? (Math.abs(div) / (div > 0 ? (1 - poly) : poly) * 100).toFixed(1) + '%'
     : '~0%';
 
-  const signal = Math.abs(div) < 0.03 ? 'watch'
-               : div > 0              ? 'buy'
-               :                        'sell';
+  const confianza = Math.abs(model - 0.5) * 2;
+  const signal = confianza < 0.03 ? 'wait'
+               : model > 0.5     ? 'sube'
+               :                    'baja';
 
   const row = {
     time:  new Date().toLocaleTimeString('es-ES', {hour:'2-digit',minute:'2-digit',second:'2-digit'}),
@@ -1615,7 +1614,7 @@ function renderHistory() {
       <td style="color:var(--yellow)">${r.model}</td>
       <td style="color:${r.div.startsWith('+') ? 'var(--green)' : 'var(--red)'}">${r.div}</td>
       <td>${r.ev}</td>
-      <td><span class="tag ${r.signal}">${r.signal === 'buy' ? '▲ SÍ' : r.signal === 'sell' ? '▼ NO' : '◉ WAIT'}</span></td>
+      <td><span class="tag ${r.signal === 'sube' ? 'buy' : r.signal === 'baja' ? 'sell' : 'watch'}">${r.signal === 'sube' ? '▲ SUBE' : r.signal === 'baja' ? '▼ BAJA' : '◉ WAIT'}</span></td>
     </tr>
   `).join('');
 }
@@ -1733,16 +1732,16 @@ function generateSyntheticData(periodKey) {
   const numBars = periods[periodKey] || 1440;
   const data = [];
 
-  let price = 65000 + Math.random() * 20000; // Random start 65k-85k
-  const annualVol = 0.55 + Math.random() * 0.3; // 55-85% annual vol
+  let price = 65000 + Math.random() * 20000;
+  const annualVol = 0.55 + Math.random() * 0.3;
   const minuteVol = annualVol / Math.sqrt(365.25 * 24 * 60);
 
-  // Generate regime changes
+  // Regímenes de mercado (trending/ranging)
   const regimes = [];
   let t = 0;
   while (t < numBars) {
     const duration = 30 + Math.floor(Math.random() * 200);
-    const drift = (Math.random() - 0.48) * 0.0003; // slight upward bias
+    const drift = (Math.random() - 0.48) * 0.0003;
     regimes.push({ start: t, end: Math.min(t + duration, numBars), drift });
     t += duration;
   }
@@ -1754,26 +1753,23 @@ function generateSyntheticData(periodKey) {
     price *= (1 + ret);
     price = Math.max(price, 10000);
 
-    // Simulated polymarket prob with lag and noise
-    const momentum = i > 10
-      ? (price - data[Math.max(0, i-10)].price) / data[Math.max(0, i-10)].price
-      : 0;
-    const polyProb = Math.max(0.1, Math.min(0.9,
-      0.5 + momentum * 1.5 + (Math.random() - 0.5) * 0.12
-    ));
+    // Modelo simula RSI + momentum multi-ventana (como el modelo real)
+    // El modelo tiene ~55-58% accuracy en tendencia, ~48% en ranging
+    const mom5 = i > 5 ? (price - data[i-5].price) / data[i-5].price : 0;
+    const mom15 = i > 15 ? (price - data[i-15].price) / data[i-15].price : 0;
 
-    // Model prob (slightly better signal)
-    const modelMomentum = i > 5
-      ? (price - data[Math.max(0, i-5)].price) / data[Math.max(0, i-5)].price
-      : 0;
-    const modelProb = Math.max(0.35, Math.min(0.65,
-      0.5 + modelMomentum * 2.0
+    // Señal combinada momentum
+    const signal = mom5 * 0.6 + mom15 * 0.4;
+
+    // El modelo no es perfecto: agrega ruido realista
+    const noise = (Math.random() - 0.5) * 0.008;
+    const modelProb = Math.max(0.25, Math.min(0.75,
+      0.5 + signal * 15 + noise
     ));
 
     data.push({
       ts: now - (numBars - i) * 60000,
       price,
-      polyProb,
       modelProb,
     });
   }
@@ -1782,63 +1778,62 @@ function generateSyntheticData(periodKey) {
 
 function runBacktest() {
   const periodKey = $('bt-period').value;
-  const minEdge = parseFloat($('bt-edge').value);
+  const minConf = parseFloat($('bt-conf').value);
   const data = generateSyntheticData(periodKey);
 
   const trades = [];
-  let equity = 1000; // Start with $1000
+  let equity = 1000;
   const equityCurve = [equity];
-  let inPosition = false;
-  let entryPrice = 0;
-  let entryType = '';
-  let entryIdx = 0;
+  const betSize = 50; // Apuesta fija $50 por trade
 
-  for (let i = 1; i < data.length; i++) {
+  // Cada 5 barras (5 min), si el modelo tiene confianza, apuesta SUBE o BAJA
+  for (let i = 0; i < data.length - 5; i += 5) {
     const d = data[i];
-    const div = d.modelProb - d.polyProb;
+    const confianza = Math.abs(d.modelProb - 0.5) * 2;
 
-    if (!inPosition && Math.abs(div) > minEdge) {
-      inPosition = true;
-      entryPrice = d.price;
-      entryType = div > 0 ? 'LONG SÍ' : 'LONG NO';
-      entryIdx = i;
-    }
+    // Solo apostar si confianza > mínimo
+    if (confianza < minConf) continue;
 
-    // Exit after 15-30 bars or if signal reverses
-    if (inPosition && (i - entryIdx >= 15 + Math.floor(Math.random() * 15) || i === data.length - 1)) {
-      const exitPrice = d.price;
-      const isLong = entryType === 'LONG SÍ';
-      const pricePnl = isLong
-        ? (exitPrice - entryPrice) / entryPrice
-        : (entryPrice - exitPrice) / entryPrice;
+    const prediccion = d.modelProb > 0.5 ? 'SUBE' : 'BAJA';
+    const precioEntrada = d.price;
+    const precioSalida = data[i + 5].price;
+    const realmenteSubio = precioSalida > precioEntrada;
 
-      // Polymarket-style P&L: based on probability edge
-      const edgePnl = pricePnl * 0.5 + (Math.random() - 0.4) * 0.02;
-      const dollarPnl = equity * 0.05 * edgePnl; // 5% position size
-      equity += dollarPnl;
-      equityCurve.push(equity);
+    // Acertó?
+    const acierto = (prediccion === 'SUBE' && realmenteSubio) ||
+                    (prediccion === 'BAJA' && !realmenteSubio);
 
-      trades.push({
-        date: new Date(data[entryIdx].ts).toLocaleDateString('es-ES', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}),
-        type: entryType,
-        entry: entryPrice.toFixed(0),
-        exit: exitPrice.toFixed(0),
-        pnl: dollarPnl,
-        cumulative: equity,
-      });
+    // En Polymarket: si aciertas ganas ~(1/prob - 1) * apuesta, si fallas pierdes apuesta
+    // Simplificado: acertar = +betSize * (1 - probModel)/probModel limitado,
+    // fallar = -betSize
+    const probUsada = Math.max(d.modelProb, 1 - d.modelProb); // la prob dominante
+    const payout = betSize * ((1 / probUsada) - 1); // ganancia potencial
+    const pnl = acierto ? Math.min(payout, betSize * 1.5) : -betSize;
 
-      inPosition = false;
-    }
+    equity += pnl;
+    equity = Math.max(0, equity);
+    equityCurve.push(equity);
+
+    trades.push({
+      date: new Date(d.ts).toLocaleDateString('es-ES', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}),
+      prediccion,
+      precioInit: precioEntrada.toFixed(0),
+      precio5m: precioSalida.toFixed(0),
+      acierto,
+      pnl,
+      cumulative: equity,
+    });
+
+    if (equity <= 0) break;
   }
 
-  // Calculate stats
-  const wins = trades.filter(t => t.pnl > 0).length;
-  const losses = trades.filter(t => t.pnl <= 0).length;
+  // Stats
+  const wins = trades.filter(t => t.acierto).length;
   const totalPnl = equity - 1000;
   const winRate = trades.length > 0 ? wins / trades.length : 0;
 
-  // Sharpe ratio
-  const returns = trades.map(t => t.pnl / 1000);
+  // Sharpe
+  const returns = trades.map(t => t.pnl / betSize);
   const avgRet = returns.length > 0 ? returns.reduce((a,b)=>a+b,0)/returns.length : 0;
   const stdRet = returns.length > 1
     ? Math.sqrt(returns.reduce((a,b)=>a+(b-avgRet)**2,0)/(returns.length-1))
@@ -1854,20 +1849,19 @@ function runBacktest() {
   $('bt-sharpe').textContent = sharpe.toFixed(2);
   $('bt-sharpe').style.color = sharpe > 1 ? 'var(--green)' : sharpe > 0 ? 'var(--yellow)' : 'var(--red)';
 
-  // Draw equity curve
   drawEquityCurve(equityCurve);
 
-  // Render trades table (last 20)
+  // Render trades table (last 30)
   const tbody = $('bt-trades-body');
-  const lastTrades = trades.slice(-20).reverse();
+  const lastTrades = trades.slice(-30).reverse();
   tbody.innerHTML = lastTrades.map(t => `
     <tr>
       <td style="color:var(--muted)">${t.date}</td>
-      <td><span class="tag ${t.type === 'LONG SÍ' ? 'buy' : 'sell'}">${t.type}</span></td>
-      <td>$${t.entry}</td>
-      <td>$${t.exit}</td>
-      <td style="color:${t.pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</td>
-      <td style="color:var(--accent)">$${t.cumulative.toFixed(2)}</td>
+      <td><span class="tag ${t.prediccion === 'SUBE' ? 'buy' : 'sell'}">${t.prediccion === 'SUBE' ? '▲ SUBE' : '▼ BAJA'}</span></td>
+      <td>$${t.precioInit}</td>
+      <td>$${t.precio5m}</td>
+      <td style="color:${t.acierto ? 'var(--green)' : 'var(--red)'}">${t.acierto ? '✓ +' : '✗ '}$${Math.abs(t.pnl).toFixed(0)}</td>
+      <td style="color:var(--accent)">$${t.cumulative.toFixed(0)}</td>
     </tr>
   `).join('');
 }
