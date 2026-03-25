@@ -920,10 +920,10 @@
         <option value="30d">Últimos 30 días simulados</option>
       </select>
       <select id="bt-conf" onchange="runBacktest()">
-        <option value="0.03">Confianza mín: 3%</option>
-        <option value="0.05" selected>Confianza mín: 5%</option>
         <option value="0.08">Confianza mín: 8%</option>
         <option value="0.12">Confianza mín: 12%</option>
+        <option value="0.16" selected>Confianza mín: 16% (EV+)</option>
+        <option value="0.24">Confianza mín: 24%</option>
       </select>
       <button onclick="runBacktest()" class="primary">▶ Ejecutar Backtest</button>
     </div>
@@ -966,6 +966,33 @@
       </table>
     </div>
     <div class="api-note">⚠️ Datos reales de Binance (BTC/USDT). <strong>LIMITACIÓN IMPORTANTE:</strong> Los pesos del modelo fueron calibrados a mano, no por regresión — el backtest es indicativo pero NO es evidencia de edge. Además, no incluye order flow ni liquidaciones (no disponibles históricamente). Para validación real se necesita: (1) fijar pesos SIN ver datos de test, (2) regresión sobre 30+ días, (3) AUC-ROC > 0.54 out-of-sample.</div>
+  </div>
+
+  <!-- Calibration Stats -->
+  <div class="bt-section" id="cal-section">
+    <div class="section-title">Calibración del Modelo (datos reales de esta instancia)</div>
+    <div class="bt-stats" id="cal-stats">
+      <div class="bt-stat">
+        <div class="bt-stat-label">Señales Registradas</div>
+        <div class="bt-stat-value" id="cal-total">—</div>
+      </div>
+      <div class="bt-stat">
+        <div class="bt-stat-label">Con Outcome (5 min)</div>
+        <div class="bt-stat-value" id="cal-outcomes">—</div>
+      </div>
+      <div class="bt-stat">
+        <div class="bt-stat-label">Win Rate Real</div>
+        <div class="bt-stat-value" id="cal-winrate">—</div>
+      </div>
+      <div class="bt-stat">
+        <div class="bt-stat-label">Mejor Señal</div>
+        <div class="bt-stat-value" id="cal-best">—</div>
+      </div>
+    </div>
+    <div id="cal-detail" style="font-family:'Space Mono',monospace;font-size:0.6rem;color:var(--muted);padding:8px 0;">
+      Acumulando datos... Las señales se registran cada 30s y el outcome se verifica 5 min después.
+    </div>
+    <div class="api-note">Las correlaciones de señales miden qué inputs del modelo realmente predicen el outcome. Correlación > 0.1 = señal útil. < 0.05 = ruido.</div>
   </div>
 
   <!-- News & Sentiment -->
@@ -1762,7 +1789,7 @@ function updateDivergenceDisplay() {
   const signalDesc  = $('signal-desc');
   const signalIcon  = $('signal-icon');
 
-  const MIN_CONF = 0.03;  // 3% mínimo de confianza (53% o 47%)
+  const MIN_CONF = 0.16;  // 16% confianza mín → 58% modelo → EV+ después de spread Polymarket
 
   if (confianza < MIN_CONF) {
     signalBox.className   = 'signal-box neutral';
@@ -2228,6 +2255,129 @@ setInterval(() => {
     fetchAll();
   }
 }, 1000);
+
+// ─── Signal Logging para Calibración ──────────────────────────────
+// Cada 30s, guarda la señal actual en el backend.
+// 5 min después, registra si acertó o no.
+const _pendingOutcomes = [];  // {ts, price, modelProb}
+
+async function logSignalToBackend() {
+  if (!state.modelProb || !state.btcPrice || !state.signalDetail) return;
+  const sd = state.signalDetail;
+  const ts = Date.now();
+
+  // Guardar señal
+  try {
+    await fetch('/api/log_signal', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        ts,
+        flow: sd.flow !== 'N/A' ? parseFloat(sd.flow) : null,
+        cvd: sd.cvd !== 'N/A' ? parseFloat(sd.cvd) : null,
+        ob: sd.ob !== 'N/A' ? parseFloat(sd.ob) : null,
+        liq: sd.liq !== 'N/A' ? parseFloat(sd.liq) : null,
+        mom: parseFloat(sd.mom),
+        funding: parseFloat(sd.funding),
+        regime: parseFloat(sd.regime),
+        spreadDisc: parseFloat(sd.spread),
+        modelProb: state.modelProb,
+        btcPrice: state.btcPrice,
+      }),
+    });
+  } catch(e) { /* server not available */ }
+
+  // Registrar para outcome check en 5 min
+  _pendingOutcomes.push({
+    ts,
+    price: state.btcPrice,
+    predictedUp: state.modelProb > 0.5,
+  });
+}
+
+async function checkOutcomes() {
+  const now = Date.now();
+  const fiveMin = 300000;
+
+  while (_pendingOutcomes.length > 0 && now - _pendingOutcomes[0].ts >= fiveMin) {
+    const pending = _pendingOutcomes.shift();
+    if (!state.btcPrice) continue;
+
+    const priceNow = state.btcPrice;
+    const wentUp = priceNow > pending.price;
+    const outcome = (pending.predictedUp === wentUp) ? 1 : 0;
+
+    try {
+      await fetch('/api/log_outcome', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          ts: pending.ts,
+          outcome,
+          outcomePrice: priceNow,
+        }),
+      });
+      console.log(`[calibration] Outcome logged: predicted ${pending.predictedUp ? 'UP' : 'DOWN'}, ` +
+        `actual ${wentUp ? 'UP' : 'DOWN'} → ${outcome ? '✓' : '✗'} ` +
+        `($${pending.price.toFixed(0)} → $${priceNow.toFixed(0)})`);
+    } catch(e) { /* server not available */ }
+  }
+}
+
+async function fetchCalibration() {
+  try {
+    const res = await fetch('/api/calibration', { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return;
+    const data = await res.json();
+
+    $('cal-total').textContent = data.totalSignals || 0;
+    $('cal-outcomes').textContent = data.withOutcome || 0;
+
+    if (data.status === 'ok') {
+      const wr = data.overallWinRate;
+      $('cal-winrate').textContent = (wr * 100).toFixed(1) + '%';
+      $('cal-winrate').style.color = wr > 0.55 ? 'var(--green)' : wr > 0.50 ? 'var(--yellow)' : 'var(--red)';
+
+      // Mejor señal por correlación
+      const corr = data.signalCorrelation || {};
+      let bestSig = '—', bestVal = 0;
+      for (const [k, v] of Object.entries(corr)) {
+        if (v != null && Math.abs(v) > Math.abs(bestVal)) { bestSig = k; bestVal = v; }
+      }
+      $('cal-best').textContent = bestVal !== 0 ? `${bestSig} (${bestVal > 0 ? '+' : ''}${bestVal.toFixed(2)})` : '—';
+      $('cal-best').style.color = Math.abs(bestVal) > 0.1 ? 'var(--green)' : 'var(--muted)';
+
+      // Detail text
+      const lines = [];
+      lines.push(`Win rate total: ${(wr*100).toFixed(1)}% sobre ${data.withOutcome} señales`);
+      const bc = data.byConfidence || {};
+      for (const [k, v] of Object.entries(bc)) {
+        if (v.count > 0) {
+          const label = k === 'low' ? 'Baja (<10%)' : k === 'med' ? 'Media (10-20%)' : 'Alta (>20%)';
+          lines.push(`  Confianza ${label}: ${(v.winRate*100).toFixed(1)}% (n=${v.count})`);
+        }
+      }
+      lines.push(`Correlación señales:`);
+      for (const [k, v] of Object.entries(corr)) {
+        if (v != null) {
+          const bar = v > 0.1 ? '█' : v > 0.05 ? '▓' : v > 0 ? '░' : '·';
+          lines.push(`  ${k.padEnd(8)} ${bar} ${v > 0 ? '+' : ''}${v.toFixed(3)}`);
+        }
+      }
+      $('cal-detail').textContent = lines.join('\n');
+      $('cal-detail').style.whiteSpace = 'pre';
+    } else {
+      $('cal-winrate').textContent = '—';
+      $('cal-detail').textContent = data.message || 'Acumulando datos...';
+    }
+  } catch(e) { /* server unavailable */ }
+}
+
+// Log señal cada 30s, check outcomes cada 10s, refresh calibration cada 60s
+setInterval(logSignalToBackend, 30000);
+setInterval(checkOutcomes, 10000);
+setInterval(fetchCalibration, 60000);
+setTimeout(fetchCalibration, 5000);  // first load
 
 // ─── Init ─────────────────────────────────────────────────────────
 // Restaurar historial de precios desde sessionStorage
