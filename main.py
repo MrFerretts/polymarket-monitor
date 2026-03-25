@@ -60,6 +60,7 @@ signals_state = {
     # Order book imbalance: ratio bid_vol / (bid_vol + ask_vol) - 0.5
     # >0 = más presión compradora, <0 = más presión vendedora
     "obImbalance": 0.0,
+    "obImbalanceEma": 0.0,    # EMA suavizado (alpha=0.3) para reducir ruido
     "obBidVol": 0.0,
     "obAskVol": 0.0,
     "obSpread": 0.0,          # spread bid-ask real de Binance
@@ -444,8 +445,14 @@ async def fetch_orderbook_loop():
 
                 signals_state["obBidVol"] = round(bid_vol, 4)
                 signals_state["obAskVol"] = round(ask_vol, 4)
-                signals_state["obImbalance"] = round(
-                    (bid_vol / total - 0.5) * 2 if total > 0 else 0, 4
+                raw_imbalance = (bid_vol / total - 0.5) * 2 if total > 0 else 0
+                signals_state["obImbalance"] = round(raw_imbalance, 4)
+
+                # EMA smoothing (alpha=0.3 → ~6 readings half-life at 2s = 12s)
+                alpha = 0.3
+                prev_ema = signals_state["obImbalanceEma"]
+                signals_state["obImbalanceEma"] = round(
+                    alpha * raw_imbalance + (1 - alpha) * prev_ema, 4
                 )
 
                 # Spread real bid-ask
@@ -531,33 +538,55 @@ async def fetch_volume_loop():
 
 # ─── Fetch Liquidaciones vía REST (cada 5 segundos) ─────────────
 async def fetch_liquidations_loop():
-    """Monitorea liquidaciones recientes vía ticker de futuros."""
-    # Nota: El WebSocket de liquidaciones (!forceOrder@arr) requiere
-    # conexión persistente a fstream.binance.com. Usamos una aproximación
-    # vía el endpoint de trades agresivos de futuros.
+    """Monitorea liquidaciones recientes vía /fapi/v1/allForceOrders."""
     while True:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                # Usamos el endpoint de aggressive trades recientes
                 res = await client.get(
-                    "https://fapi.binance.com/fapi/v1/ticker/24hr",
-                    params={"symbol": "BTCUSDT"},
+                    "https://fapi.binance.com/fapi/v1/allForceOrders",
+                    params={"symbol": "BTCUSDT", "limit": 50},
                 )
                 res.raise_for_status()
-                data = res.json()
+                orders = res.json()
 
-                # Aproximar presión de liquidación desde long/short ratio
-                # No hay endpoint público directo, pero podemos inferir
-                # del ratio de volumen comprador vs vendedor
-                buy_vol = float(data.get("volume", 0))
-                quote_vol = float(data.get("quoteVolume", 0))
+                # Acumular liquidaciones de los últimos 5 minutos
+                now_ms = int(time.time() * 1000)
+                cutoff = now_ms - 300000  # 5 min
 
-                # Actualizar estado con lo que tenemos
-                signals_state["liqLongTotal"] = 0
-                signals_state["liqShortTotal"] = 0
+                long_total = 0.0
+                short_total = 0.0
+                recent_events = []
+
+                for o in orders:
+                    trade_time = o.get("time", 0)
+                    if trade_time < cutoff:
+                        continue
+
+                    side = o.get("side", "")  # BUY = short liquidated, SELL = long liquidated
+                    qty = float(o.get("executedQty", 0))
+                    price_val = float(o.get("averagePrice") or o.get("price", 0))
+                    usd_val = qty * price_val
+
+                    if side == "SELL":
+                        long_total += usd_val
+                    elif side == "BUY":
+                        short_total += usd_val
+
+                    recent_events.append({
+                        "side": "LONG" if side == "SELL" else "SHORT",
+                        "usd": round(usd_val, 0),
+                        "time": trade_time,
+                    })
+
+                signals_state["liqLongTotal"] = round(long_total, 0)
+                signals_state["liqShortTotal"] = round(short_total, 0)
+                signals_state["liqEvents"] = recent_events[-20:]
 
         except Exception as e:
-            print(f"[liquidations] Error: {e}")
+            # allForceOrders puede no estar disponible en todas las regiones
+            # Fallback silencioso
+            if "403" not in str(e) and "451" not in str(e):
+                print(f"[liquidations] Error: {e}")
 
         await asyncio.sleep(5)
 
@@ -627,6 +656,7 @@ async def get_forecast():
 async def get_signals():
     return JSONResponse({
         "obImbalance": signals_state["obImbalance"],
+        "obImbalanceEma": signals_state["obImbalanceEma"],
         "obBidVol": signals_state["obBidVol"],
         "obAskVol": signals_state["obAskVol"],
         "obSpread": signals_state["obSpread"],
