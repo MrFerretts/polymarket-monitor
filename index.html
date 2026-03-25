@@ -832,10 +832,10 @@
     </div>
 
     <div class="card" id="card-model">
-      <div class="card-label">Predicción Modelo (OB + Vol + Funding)</div>
+      <div class="card-label">Predicción Modelo (Flow + CVD + OB)</div>
       <div class="card-value" id="model-prob">—</div>
       <div class="card-sub">
-        OB: <span id="sig-ob">—</span> · Vol: <span id="sig-vol">—</span> · Fund: <span id="sig-fund">—</span>
+        Flow: <span id="sig-flow">—</span> · CVD: <span id="sig-cvd">—</span> · OB: <span id="sig-ob">—</span> · Liq: <span id="sig-liq">—</span>
       </div>
     </div>
 
@@ -965,7 +965,7 @@
         </tbody>
       </table>
     </div>
-    <div class="api-note">⚠️ Backtest sobre datos REALES de Binance (BTC/USDT). Walk-forward: 30% warmup, 70% out-of-sample. Sin order book (no disponible históricamente), solo precio + volumen. Resultados pasados no garantizan rendimiento futuro.</div>
+    <div class="api-note">⚠️ Datos reales de Binance (BTC/USDT). <strong>LIMITACIÓN IMPORTANTE:</strong> Los pesos del modelo fueron calibrados a mano, no por regresión — el backtest es indicativo pero NO es evidencia de edge. Además, no incluye order flow ni liquidaciones (no disponibles históricamente). Para validación real se necesita: (1) fijar pesos SIN ver datos de test, (2) regresión sobre 30+ días, (3) AUC-ROC > 0.54 out-of-sample.</div>
   </div>
 
   <!-- News & Sentiment -->
@@ -1032,6 +1032,18 @@ const state = {
   loading: false,
   polyMarketId: null,    // se buscará dinámicamente
   signals: null,         // datos reales de Binance (OB, funding, volume)
+
+  // ── Order Flow tracking (del WebSocket de trades) ──
+  // Aggressive buys/sells por ventana temporal
+  aggBuys1m: 0, aggSells1m: 0,    // último minuto
+  aggBuys3m: 0, aggSells3m: 0,    // últimos 3 min
+  aggBuys5m: 0, aggSells5m: 0,    // últimos 5 min
+  _tradeLog: [],                   // ring buffer: {ts, qty, isBuy}
+  cvd: 0,                         // Cumulative Volume Delta (5 min rolling)
+  cvdHistory: [],                  // para detectar divergencias CVD vs precio
+
+  // ── Order book EMA (suavizado) ──
+  obImbalanceEma: 0,              // EMA del imbalance para reducir ruido
 };
 
 // ─── Utilidades ──────────────────────────────────────────────────
@@ -1068,7 +1080,44 @@ function connectBinanceWS() {
   ws.onmessage = (e) => {
     const d = JSON.parse(e.data);
     const price = parseFloat(d.p);
+    const qty = parseFloat(d.q);
     const now = Date.now();
+
+    // ── Order Flow: track aggressive buys/sells ──
+    // d.m = true → seller was maker → BUYER was aggressor
+    // d.m = false → buyer was maker → SELLER was aggressor
+    const isBuy = !d.m;
+    state._tradeLog.push({ ts: now, qty, isBuy });
+
+    // Limpiar trades > 5 minutos
+    const cutoff5m = now - 300000;
+    while (state._tradeLog.length > 0 && state._tradeLog[0].ts < cutoff5m) {
+      state._tradeLog.shift();
+    }
+
+    // Recalcular ventanas (cada 500ms max para no bloquear)
+    if (!state._lastFlowCalc || now - state._lastFlowCalc > 500) {
+      state._lastFlowCalc = now;
+      const c1m = now - 60000, c3m = now - 180000;
+      let b1=0, s1=0, b3=0, s3=0, b5=0, s5=0, cvd=0;
+      for (const t of state._tradeLog) {
+        const v = t.qty;
+        if (t.isBuy) { b5 += v; if (t.ts >= c3m) { b3 += v; if (t.ts >= c1m) b1 += v; } }
+        else         { s5 += v; if (t.ts >= c3m) { s3 += v; if (t.ts >= c1m) s1 += v; } }
+        cvd += t.isBuy ? v : -v;
+      }
+      state.aggBuys1m = b1; state.aggSells1m = s1;
+      state.aggBuys3m = b3; state.aggSells3m = s3;
+      state.aggBuys5m = b5; state.aggSells5m = s5;
+      state.cvd = cvd;
+
+      // CVD history (1 punto/segundo, últimos 5 min)
+      if (!state._lastCvdLog || now - state._lastCvdLog > 1000) {
+        state._lastCvdLog = now;
+        state.cvdHistory.push({ ts: now, cvd, price });
+        while (state.cvdHistory.length > 300) state.cvdHistory.shift();
+      }
+    }
 
     state.btcPrice = price;
     state.btcPriceHistory.push({ price, ts: now });
@@ -1386,97 +1435,176 @@ function calcModelProb() {
 
   const sig = state.signals || {};
   const hasSignals = sig.updatedAt && (Date.now() / 1000 - sig.updatedAt) < 30;
+  const hasFlow = state._tradeLog.length > 50;  // al menos ~5s de trades
 
   // ══════════════════════════════════════════════════════════════
-  // SEÑAL 1: Order Book Imbalance (peso 35%)
-  // El indicador MÁS predictivo a 5 minutos.
-  // >0 = más bids que asks = presión compradora
+  // SEÑAL 1: Order Flow Toxicity / VPIN proxy (peso 35%)
+  // La dirección de los trades agresivos es el predictor #1 a 5 min.
+  // Ratio de compras agresivas vs ventas agresivas en ventana de 3 min.
+  // ══════════════════════════════════════════════════════════════
+  let flowSignal = 0;
+  if (hasFlow) {
+    // Usar ventana de 3 minutos como balance principal
+    const totalBuy = state.aggBuys3m;
+    const totalSell = state.aggSells3m;
+    const totalFlow = totalBuy + totalSell;
+    if (totalFlow > 0) {
+      // -1 a +1: +1 = todas compras agresivas, -1 = todas ventas
+      const rawFlow = (totalBuy - totalSell) / totalFlow;
+
+      // Confirmar con ventana de 1 min (si ambas coinciden, señal más fuerte)
+      const total1m = state.aggBuys1m + state.aggSells1m;
+      const flow1m = total1m > 0 ? (state.aggBuys1m - state.aggSells1m) / total1m : 0;
+
+      // Si 1m y 3m coinciden en dirección, amplificar
+      const confirmation = Math.sign(rawFlow) === Math.sign(flow1m) ? 1.2 : 0.8;
+      flowSignal = Math.max(-0.7, Math.min(0.7, rawFlow * confirmation));
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // SEÑAL 2: CVD Divergence (peso 15%)
+  // Si precio sube pero CVD cae → subida débil, probable reversal
+  // Si precio baja pero CVD sube → absorción, probable rebote
+  // ══════════════════════════════════════════════════════════════
+  let cvdSignal = 0;
+  if (state.cvdHistory.length >= 30) {
+    const recent = state.cvdHistory.slice(-30);  // últimos 30 segundos
+    const priceDelta = (recent[recent.length-1].price - recent[0].price) / recent[0].price;
+    const cvdDelta = recent[recent.length-1].cvd - recent[0].cvd;
+    const cvdDirection = cvdDelta > 0 ? 1 : -1;
+    const priceDirection = priceDelta > 0 ? 1 : -1;
+
+    if (cvdDirection !== priceDirection && Math.abs(priceDelta) > 0.0002) {
+      // Divergencia: CVD va contra el precio → señal contrarian
+      cvdSignal = cvdDirection * 0.3;  // seguir al CVD, no al precio
+    } else if (cvdDirection === priceDirection) {
+      // Confirmación: CVD confirma precio → señal a favor
+      cvdSignal = cvdDirection * 0.15;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // SEÑAL 3: Order Book Imbalance EMA (peso 10%)
+  // Usamos la EMA suavizada del backend, no el raw snapshot
   // ══════════════════════════════════════════════════════════════
   let obSignal = 0;
-  if (hasSignals && sig.obImbalance != null) {
-    // obImbalance va de -1 a +1, lo usamos directamente
-    // Clamp a ±0.6 para evitar señales extremas por un solo snapshot
-    obSignal = Math.max(-0.6, Math.min(0.6, sig.obImbalance));
+  if (hasSignals && sig.obImbalanceEma != null) {
+    obSignal = Math.max(-0.5, Math.min(0.5, sig.obImbalanceEma));
   }
 
   // ══════════════════════════════════════════════════════════════
-  // SEÑAL 2: Volume Ratio (peso 20%)
-  // Volumen último minuto vs media 30 min.
-  // Volumen alto + momentum = breakout real (no ruido)
+  // SEÑAL 4: Liquidation Spikes (peso 10%)
+  // Spike de liquidaciones long → squeeze → short-term bearish
+  // Spike de liquidaciones short → squeeze → short-term bullish
   // ══════════════════════════════════════════════════════════════
-  let volSignal = 0;
-  if (hasSignals && sig.volumeRatio != null) {
-    const vr = sig.volumeRatio;
-    // Si volumen > 2x promedio, amplificar la dirección del momentum
-    const mom1m = getMomentum(60);
-    if (vr > 2.0 && Math.abs(mom1m) > 0.0003) {
-      // Volumen alto confirma dirección
-      volSignal = Math.sign(mom1m) * Math.min(0.5, (vr - 1) * 0.15);
-    } else if (vr < 0.5) {
-      // Volumen bajo = sin convicción, señal neutra tirando a mean-reversion
-      const mom5m = getMomentum(300);
-      volSignal = -Math.sign(mom5m) * 0.1;
+  let liqSignal = 0;
+  if (hasSignals) {
+    const liqLong = sig.liqLongTotal || 0;
+    const liqShort = sig.liqShortTotal || 0;
+    const totalLiq = liqLong + liqShort;
+    if (totalLiq > 100000) {  // > $100k en liquidaciones = significativo
+      // Liquidaciones de longs → precio ya bajó → posible rebote (contrarian)
+      // Liquidaciones de shorts → precio ya subió → posible corrección
+      const liqRatio = (liqShort - liqLong) / totalLiq;
+      liqSignal = Math.max(-0.4, Math.min(0.4, liqRatio * 0.5));
     }
   }
 
   // ══════════════════════════════════════════════════════════════
-  // SEÑAL 3: Funding Rate (peso 15%)
-  // Funding muy positivo = longs saturados, posible reversal a la baja
-  // Funding muy negativo = shorts saturados, posible reversal al alza
-  // ══════════════════════════════════════════════════════════════
-  let fundingSignal = 0;
-  if (hasSignals && sig.fundingRate != null) {
-    const fr = sig.fundingRate;
-    // Funding normal: -0.01% a +0.01%. Extremo: >0.05% o <-0.05%
-    if (Math.abs(fr) > 0.0001) {
-      // Contrarian: funding positivo alto → bearish (longs van a cerrar)
-      fundingSignal = -Math.max(-0.4, Math.min(0.4, fr * 500));
-    }
-  }
-
-  // ══════════════════════════════════════════════════════════════
-  // SEÑAL 4: Momentum de precio (peso 25%)
-  // Ponderado multi-ventana, pero solo como confirmación
+  // SEÑAL 5: Volume-confirmed Momentum (peso 15%)
+  // Momentum SOLO cuando hay volumen que lo confirme
   // ══════════════════════════════════════════════════════════════
   const mom1m  = getMomentum(60);
   const mom5m  = getMomentum(300);
-  const mom15m = getMomentum(900);
+  const momRaw = (mom1m * 0.4) + (mom5m * 0.6);
+  let momSignal = Math.max(-0.4, Math.min(0.4, momRaw * 12));
 
-  const momRaw = (mom1m * 0.3) + (mom5m * 0.5) + (mom15m * 0.2);
-  const momSignal = Math.max(-0.4, Math.min(0.4, momRaw * 12));
-
-  // ══════════════════════════════════════════════════════════════
-  // SEÑAL 5: Breakout con volumen (peso 5%)
-  // Solo cuenta si hay volumen alto confirmando
-  // ══════════════════════════════════════════════════════════════
-  const breakout = detectBreakout();
+  // Atenuar si volumen es bajo
   const volRatio = (hasSignals && sig.volumeRatio) ? sig.volumeRatio : 1;
-  const breakoutSignal = breakout * Math.min(0.3, volRatio > 1.5 ? 0.3 : 0.1);
+  if (volRatio < 0.7) momSignal *= 0.5;  // vol bajo → momentum no confiable
 
   // ══════════════════════════════════════════════════════════════
-  // COMBINAR — pesos basados en valor predictivo real
+  // SEÑAL 6: Funding Rate como RÉGIMEN, no señal directa (peso 5%)
+  // Solo actúa cuando es extremo. Se actualiza cada 8h, no sirve
+  // como señal de 5 min. Solo como sesgo de fondo.
   // ══════════════════════════════════════════════════════════════
-  const raw = hasSignals
-    ? (obSignal    * 0.35) +
-      (volSignal   * 0.20) +
-      (fundingSignal * 0.15) +
-      (momSignal   * 0.25) +
-      (breakoutSignal * 0.05)
-    : (momSignal * 0.70) +    // Sin señales del server, solo precio
-      (breakoutSignal * 0.30);
+  let fundingBias = 0;
+  if (hasSignals && sig.fundingRate != null) {
+    const fr = sig.fundingRate;
+    // Solo extremos: > 0.03% o < -0.03% (3x lo normal)
+    if (fr > 0.0003) {
+      fundingBias = -0.1;  // longs saturados, sesgo bajista suave
+    } else if (fr < -0.0003) {
+      fundingBias = 0.1;   // shorts saturados, sesgo alcista suave
+    }
+  }
 
-  // ── Volatilidad realizada (para display)
+  // ══════════════════════════════════════════════════════════════
+  // RÉGIMEN de mercado: vol reciente vs vol de fondo
+  // En mercado ranging, reducir confianza general
+  // ══════════════════════════════════════════════════════════════
+  let regimeMultiplier = 1.0;
   const volPerSec = calcRealizedVol(120);
   state.impliedVol = Math.min(volPerSec * Math.sqrt(365.25 * 24 * 3600), 3.0);
 
+  // Si vol 2 min es < 60% de vol 15 min → mercado ranging, bajar confianza
+  if (dataSpanSec > 900) {
+    const vol15m = calcRealizedVol(900);
+    if (vol15m > 0 && volPerSec < vol15m * 0.6) {
+      regimeMultiplier = 0.6;  // mercado muerto, reducir señales
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // Spread filter: spread ancho = menos confianza
+  // ══════════════════════════════════════════════════════════════
+  let spreadDiscount = 1.0;
+  if (hasSignals && sig.obSpread > 5) {
+    spreadDiscount = 0.7;  // spread > $5 → mercado ilíquido
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // COMBINAR — pesos basados en valor predictivo por timeframe
+  // ══════════════════════════════════════════════════════════════
+  let raw;
+  if (hasFlow) {
+    // Con order flow: señal más fuerte, pesos principales
+    raw = (flowSignal   * 0.35) +
+          (cvdSignal    * 0.15) +
+          (obSignal     * 0.10) +
+          (liqSignal    * 0.10) +
+          (momSignal    * 0.15) +
+          (fundingBias  * 0.05) +
+          // 10% sin asignar = headroom para régimen
+          0;
+  } else if (hasSignals) {
+    // Sin flow pero con order book del server
+    raw = (obSignal     * 0.30) +
+          (momSignal    * 0.35) +
+          (liqSignal    * 0.15) +
+          (fundingBias  * 0.10) +
+          (detectBreakout() * 0.10);
+  } else {
+    // Solo precio (degraded mode)
+    raw = (momSignal * 0.60) + (detectBreakout() * 0.40);
+  }
+
+  // Aplicar multiplicadores
+  raw *= regimeMultiplier * spreadDiscount;
+
   // ── Guardar detalle de señales para debug
   state.signalDetail = {
+    flow: hasFlow ? flowSignal.toFixed(3) : 'N/A',
+    cvd: state.cvdHistory.length >= 30 ? cvdSignal.toFixed(3) : 'N/A',
     ob: hasSignals ? obSignal.toFixed(3) : 'N/A',
-    vol: hasSignals ? volSignal.toFixed(3) : 'N/A',
-    funding: hasSignals ? fundingSignal.toFixed(3) : 'N/A',
+    liq: hasSignals ? liqSignal.toFixed(3) : 'N/A',
     mom: momSignal.toFixed(3),
-    breakout: breakoutSignal.toFixed(3),
+    funding: fundingBias.toFixed(3),
+    regime: regimeMultiplier.toFixed(2),
+    spread: spreadDiscount.toFixed(2),
     raw: raw.toFixed(4),
+    hasFlow,
     hasServerData: hasSignals,
   };
 
@@ -1577,15 +1705,16 @@ function updatePolyDisplay() {
   // Mostrar detalle de señales
   const sd = state.signalDetail;
   if (sd) {
-    const fmt = (v, label) => {
+    const fmtSig = (v) => {
       if (v === 'N/A') return '—';
       const n = parseFloat(v);
       const color = n > 0.05 ? 'var(--green)' : n < -0.05 ? 'var(--red)' : 'var(--muted)';
       return `<span style="color:${color}">${n > 0 ? '+' : ''}${(n*100).toFixed(0)}%</span>`;
     };
-    $('sig-ob').innerHTML = fmt(sd.ob);
-    $('sig-vol').innerHTML = fmt(sd.vol);
-    $('sig-fund').innerHTML = fmt(sd.funding);
+    $('sig-flow').innerHTML = fmtSig(sd.flow);
+    $('sig-cvd').innerHTML = fmtSig(sd.cvd);
+    $('sig-ob').innerHTML = fmtSig(sd.ob);
+    $('sig-liq').innerHTML = fmtSig(sd.liq);
   }
 }
 
