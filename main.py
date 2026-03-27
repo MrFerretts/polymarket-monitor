@@ -86,6 +86,18 @@ signals_state = {
     "lastUpdate": None,
 }
 
+# ─── Estado del mercado "Bitcoin Up or Down - 5 Minutes" ────────
+updown_state = {
+    "found": False,
+    "marketTitle": None,
+    "strikePrice": None,       # precio de referencia al inicio del intervalo
+    "upPrice": None,           # precio del token "Up" (e.g. 0.65)
+    "downPrice": None,         # precio del token "Down" (e.g. 0.36)
+    "intervalEndTs": None,     # epoch ms cuando termina el intervalo
+    "conditionId": None,
+    "lastUpdate": None,
+}
+
 # Ring buffer para volumen por minuto (últimos 30 minutos)
 _volume_per_minute = deque(maxlen=30)
 _current_minute_vol = 0.0
@@ -141,6 +153,14 @@ def analyze_sentiment(text: str) -> float:
 
 def strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text or "")
+
+
+def is_btc_5min_updown(m: dict) -> bool:
+    """Detecta el mercado específico 'Bitcoin Up or Down - 5 Minutes'."""
+    q = (m.get("question", "") + " " + m.get("title", "")).lower()
+    return ("bitcoin" in q or "btc" in q) and (
+        "up or down" in q or "5 minute" in q or "5-minute" in q
+    )
 
 
 def is_btc_directional(m: dict) -> bool:
@@ -592,6 +612,120 @@ async def fetch_liquidations_loop():
         await asyncio.sleep(5)
 
 
+# ─── Fetch "Bitcoin Up or Down - 5 Minutes" market ───────────────
+async def fetch_updown_loop():
+    """Busca el mercado activo de 'Bitcoin Up or Down - 5 Minutes' cada 15s.
+    Extrae strike price, precios Up/Down, y tiempo restante del intervalo."""
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                # Buscar en Gamma API con query específico
+                for query in ["Bitcoin Up or Down 5 Minutes", "BTC Up or Down"]:
+                    res = await client.get(
+                        GAMMA_URL,
+                        params={
+                            "active": "true",
+                            "closed": "false",
+                            "limit": 20,
+                            "order": "volume",
+                            "ascending": "false",
+                        },
+                    )
+                    res.raise_for_status()
+                    markets = res.json()
+                    if not isinstance(markets, list):
+                        markets = markets.get("data", [])
+
+                    for m in markets:
+                        if not is_btc_5min_updown(m):
+                            continue
+
+                        # Verificar que no haya expirado
+                        end = m.get("endDate")
+                        if end:
+                            try:
+                                end_dt = datetime.fromisoformat(
+                                    end.replace("Z", "+00:00")
+                                )
+                                if end_dt <= datetime.now(timezone.utc):
+                                    continue
+                            except ValueError:
+                                pass
+
+                        # Extraer precios Up/Down de outcomePrices
+                        up_price = None
+                        down_price = None
+                        outcome_prices = m.get("outcomePrices")
+                        if outcome_prices:
+                            try:
+                                arr = outcome_prices
+                                if isinstance(arr, str):
+                                    arr = json.loads(arr)
+                                up_price = float(arr[0])
+                                if len(arr) > 1:
+                                    down_price = float(arr[1])
+                            except Exception:
+                                pass
+
+                        # Extraer strike price del título/description
+                        # Formato típico: "Bitcoin Up or Down - 5 Minutes"
+                        # El strike viene en description o en campos custom
+                        strike = None
+                        desc = m.get("description", "") or ""
+                        title = m.get("question", "") or m.get("title", "") or ""
+
+                        # Buscar precio en description/title: $71,094.51 o 71094.51
+                        for text in [desc, title]:
+                            price_match = re.search(
+                                r'\$?([\d,]+\.?\d*)', text
+                            )
+                            if price_match:
+                                try:
+                                    val = float(
+                                        price_match.group(1).replace(",", "")
+                                    )
+                                    # Debe ser un precio razonable de BTC
+                                    if 10000 < val < 500000:
+                                        strike = val
+                                        break
+                                except ValueError:
+                                    pass
+
+                        # Calcular fin del intervalo desde endDate
+                        interval_end_ts = None
+                        if end:
+                            try:
+                                end_dt = datetime.fromisoformat(
+                                    end.replace("Z", "+00:00")
+                                )
+                                interval_end_ts = int(end_dt.timestamp() * 1000)
+                            except ValueError:
+                                pass
+
+                        updown_state["found"] = True
+                        updown_state["marketTitle"] = (
+                            title[:80] if title else "BTC Up or Down 5min"
+                        )
+                        updown_state["strikePrice"] = strike
+                        updown_state["upPrice"] = up_price
+                        updown_state["downPrice"] = down_price
+                        updown_state["intervalEndTs"] = interval_end_ts
+                        updown_state["conditionId"] = m.get("conditionId")
+                        updown_state["lastUpdate"] = time.time()
+                        break
+
+                    if updown_state["found"]:
+                        break
+
+                if not updown_state["found"]:
+                    updown_state["lastUpdate"] = time.time()
+
+        except Exception as e:
+            print(f"[updown] Error: {e}")
+
+        await asyncio.sleep(15)
+
+
 # ─── App lifecycle ────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -602,9 +736,11 @@ async def lifespan(app: FastAPI):
     funding_task = asyncio.create_task(fetch_funding_loop())
     volume_task = asyncio.create_task(fetch_volume_loop())
     liquidations_task = asyncio.create_task(fetch_liquidations_loop())
+    updown_task = asyncio.create_task(fetch_updown_loop())
     yield
     for task in [poly_task, news_task, forecast_task,
-                 orderbook_task, funding_task, volume_task, liquidations_task]:
+                 orderbook_task, funding_task, volume_task,
+                 liquidations_task, updown_task]:
         task.cancel()
 
 
@@ -670,6 +806,21 @@ async def get_signals():
         "liqShortTotal": signals_state["liqShortTotal"],
         "openInterest": signals_state["openInterest"],
         "updatedAt": signals_state["lastUpdate"],
+    })
+
+
+@app.get("/api/updown")
+async def get_updown():
+    """Estado del mercado 'Bitcoin Up or Down - 5 Minutes'."""
+    return JSONResponse({
+        "found": updown_state["found"],
+        "marketTitle": updown_state["marketTitle"],
+        "strikePrice": updown_state["strikePrice"],
+        "upPrice": updown_state["upPrice"],
+        "downPrice": updown_state["downPrice"],
+        "intervalEndTs": updown_state["intervalEndTs"],
+        "conditionId": updown_state["conditionId"],
+        "updatedAt": updown_state["lastUpdate"],
     })
 
 
