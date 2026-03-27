@@ -823,19 +823,21 @@
     </div>
 
     <div class="card" id="card-poly">
-      <div class="card-label">Polymarket (contexto, no señal)</div>
+      <div class="card-label">Polymarket · BTC Up/Down 5min</div>
       <div class="card-value" id="poly-prob">—</div>
       <div class="card-sub">
         <span id="poly-market-name">Buscando mercado...</span>
         <span class="spread-indicator medium" id="spread-badge" style="display:none">Spread: —</span>
       </div>
+      <div class="card-sub" id="strike-info" style="margin-top:4px;color:var(--accent);font-size:0.62rem">
+      </div>
     </div>
 
     <div class="card" id="card-model">
-      <div class="card-label">Predicción Modelo (Flow + CVD + OB)</div>
+      <div class="card-label">Modelo (Flow + Strike + CVD + OB)</div>
       <div class="card-value" id="model-prob">—</div>
       <div class="card-sub">
-        Flow: <span id="sig-flow">—</span> · CVD: <span id="sig-cvd">—</span> · OB: <span id="sig-ob">—</span> · Liq: <span id="sig-liq">—</span>
+        Flow: <span id="sig-flow">—</span> · Strike: <span id="sig-strike">—</span> · CVD: <span id="sig-cvd">—</span> · OB: <span id="sig-ob">—</span>
       </div>
     </div>
 
@@ -851,7 +853,7 @@
 
   <div class="divergence-section" id="div-section">
     <div class="div-header">
-      <div class="div-title">Predicción: ¿BTC sube o baja en 5 min?</div>
+      <div class="div-title">Predicción: ¿BTC cierra arriba o abajo del strike en 5 min?</div>
       <div class="ev-badge neutral" id="ev-badge">Calculando...</div>
     </div>
 
@@ -859,9 +861,9 @@
       <div class="meter-fill" id="meter-fill" style="width:50%; background: var(--yellow)"></div>
     </div>
     <div class="meter-labels">
-      <span>BAJA (apostar NO)</span>
+      <span>DOWN (bajo strike)</span>
       <span>50/50</span>
-      <span>SUBE (apostar SÍ)</span>
+      <span>UP (sobre strike)</span>
     </div>
 
     <div class="signal-box neutral" id="signal-box">
@@ -1024,9 +1026,9 @@
         <tr>
           <th>Hora</th>
           <th>BTC Price</th>
-          <th>Poly %</th>
+          <th>Up/Down</th>
           <th>Modelo %</th>
-          <th>Divergencia</th>
+          <th>Strike Δ</th>
           <th>EV</th>
           <th>Señal</th>
         </tr>
@@ -1071,6 +1073,14 @@ const state = {
 
   // ── Order book EMA (suavizado) ──
   obImbalanceEma: 0,              // EMA del imbalance para reducir ruido
+
+  // ── Polymarket "Bitcoin Up or Down - 5 Minutes" ──
+  strikePrice: null,              // precio de referencia del intervalo
+  upPrice: null,                  // precio token Up (e.g. 0.65)
+  downPrice: null,                // precio token Down (e.g. 0.36)
+  intervalEndTs: null,            // epoch ms fin del intervalo
+  updownFound: false,             // si se encontró el mercado
+  updownTitle: null,
 };
 
 // ─── Utilidades ──────────────────────────────────────────────────
@@ -1350,6 +1360,28 @@ async function fetchSignals() {
   } catch(e) { console.warn('Signals fetch:', e.message); }
 }
 
+async function fetchUpDown() {
+  try {
+    const res = await fetch('/api/updown', { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return;
+    const data = await res.json();
+    state.updownFound = data.found || false;
+    state.updownTitle = data.marketTitle;
+    state.strikePrice = data.strikePrice;
+    state.upPrice = data.upPrice;
+    state.downPrice = data.downPrice;
+    state.intervalEndTs = data.intervalEndTs;
+
+    // Actualizar UI del mercado detectado
+    if (data.found) {
+      $('poly-market-name').textContent = data.marketTitle || 'BTC Up/Down 5min';
+      if (data.upPrice != null && data.downPrice != null) {
+        $('poly-prob').textContent = `Up ${(data.upPrice*100).toFixed(0)}¢ / Down ${(data.downPrice*100).toFixed(0)}¢`;
+      }
+    }
+  } catch(e) { console.warn('UpDown fetch:', e.message); }
+}
+
 function simulatePolyProb() {
   if (!state.btcChange1h) return 0.50;
   const base  = 0.50 + state.btcChange1h * 2.5;
@@ -1592,28 +1624,74 @@ function calcModelProb() {
   }
 
   // ══════════════════════════════════════════════════════════════
+  // SEÑAL 7: Strike Delta — distancia al precio de referencia (peso 10%)
+  // Si BTC ya está por encima del strike → Up tiene ventaja
+  // Si BTC está por debajo → Down tiene ventaja
+  // La importancia crece cuando queda menos tiempo (mean-reversion baja)
+  // ══════════════════════════════════════════════════════════════
+  let strikeDeltaSignal = 0;
+  if (state.strikePrice && state.btcPrice) {
+    const delta = (state.btcPrice - state.strikePrice) / state.strikePrice;
+    // delta > 0 → precio actual > strike → Up ganando
+    // Escalar: 0.1% delta = señal moderada, 0.5% = señal fuerte
+    strikeDeltaSignal = Math.max(-0.6, Math.min(0.6, delta * 200));
+
+    // Amplificar si queda poco tiempo (último minuto del intervalo)
+    if (state.intervalEndTs) {
+      const secsLeft = (state.intervalEndTs - Date.now()) / 1000;
+      if (secsLeft > 0 && secsLeft < 60) {
+        // Último minuto: el precio actual casi define el outcome
+        strikeDeltaSignal *= 1.5;
+        strikeDeltaSignal = Math.max(-0.8, Math.min(0.8, strikeDeltaSignal));
+      } else if (secsLeft > 0 && secsLeft < 120) {
+        strikeDeltaSignal *= 1.2;
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
   // COMBINAR — pesos basados en valor predictivo por timeframe
   // ══════════════════════════════════════════════════════════════
+  const hasStrike = state.strikePrice != null && state.btcPrice != null;
+
   let raw;
   if (hasFlow) {
-    // Con order flow: señal más fuerte, pesos principales
-    raw = (flowSignal   * 0.35) +
-          (cvdSignal    * 0.15) +
-          (obSignal     * 0.10) +
-          (liqSignal    * 0.10) +
-          (momSignal    * 0.15) +
-          (fundingBias  * 0.05) +
-          // 10% sin asignar = headroom para régimen
-          0;
+    if (hasStrike) {
+      // Modo completo con strike price: strikeDelta es clave
+      raw = (flowSignal        * 0.25) +
+            (strikeDeltaSignal * 0.20) +
+            (cvdSignal         * 0.12) +
+            (obSignal          * 0.08) +
+            (liqSignal         * 0.08) +
+            (momSignal         * 0.12) +
+            (fundingBias       * 0.05) +
+            0;
+    } else {
+      // Sin strike: pesos originales
+      raw = (flowSignal   * 0.35) +
+            (cvdSignal    * 0.15) +
+            (obSignal     * 0.10) +
+            (liqSignal    * 0.10) +
+            (momSignal    * 0.15) +
+            (fundingBias  * 0.05) +
+            0;
+    }
   } else if (hasSignals) {
-    // Sin flow pero con order book del server
-    raw = (obSignal     * 0.30) +
-          (momSignal    * 0.35) +
-          (liqSignal    * 0.15) +
-          (fundingBias  * 0.10) +
-          (detectBreakout() * 0.10);
+    if (hasStrike) {
+      raw = (strikeDeltaSignal * 0.25) +
+            (obSignal          * 0.25) +
+            (momSignal         * 0.25) +
+            (liqSignal         * 0.10) +
+            (fundingBias       * 0.05) +
+            (detectBreakout()  * 0.10);
+    } else {
+      raw = (obSignal     * 0.30) +
+            (momSignal    * 0.35) +
+            (liqSignal    * 0.15) +
+            (fundingBias  * 0.10) +
+            (detectBreakout() * 0.10);
+    }
   } else {
-    // Solo precio (degraded mode)
     raw = (momSignal * 0.60) + (detectBreakout() * 0.40);
   }
 
@@ -1627,12 +1705,14 @@ function calcModelProb() {
     ob: hasSignals ? obSignal.toFixed(3) : 'N/A',
     liq: hasSignals ? liqSignal.toFixed(3) : 'N/A',
     mom: momSignal.toFixed(3),
+    strike: hasStrike ? strikeDeltaSignal.toFixed(3) : 'N/A',
     funding: fundingBias.toFixed(3),
     regime: regimeMultiplier.toFixed(2),
     spread: spreadDiscount.toFixed(2),
     raw: raw.toFixed(4),
     hasFlow,
     hasServerData: hasSignals,
+    hasStrike,
   };
 
   // Mapear a probabilidad: rango 20%-80%
@@ -1685,6 +1765,7 @@ async function fetchAll() {
       fetchNews(),
       fetchForecast(),
       fetchSignals(),
+      fetchUpDown(),
     ]);
     state.polyProb = polyProb;
     state.modelProb = calcModelProb();
@@ -1714,9 +1795,34 @@ async function fetchAll() {
 }
 
 function updatePolyDisplay() {
-  if (state.polyProb != null) {
+  // Mostrar precios Up/Down si están disponibles
+  if (state.upPrice != null && state.downPrice != null) {
+    $('poly-prob').textContent = `Up ${(state.upPrice*100).toFixed(0)}¢ / Down ${(state.downPrice*100).toFixed(0)}¢`;
+  } else if (state.polyProb != null) {
     $('poly-prob').textContent = fmtPct(state.polyProb);
   }
+
+  // Mostrar strike price y timer
+  const strikeEl = $('strike-info');
+  if (strikeEl) {
+    let info = '';
+    if (state.strikePrice) {
+      info += `Strike: $${state.strikePrice.toLocaleString()}`;
+      if (state.btcPrice) {
+        const delta = ((state.btcPrice - state.strikePrice) / state.strikePrice * 100);
+        const color = delta > 0 ? 'var(--green)' : delta < 0 ? 'var(--red)' : 'var(--muted)';
+        info += ` · <span style="color:${color}">Delta: ${delta >= 0 ? '+' : ''}${delta.toFixed(3)}%</span>`;
+      }
+    }
+    if (state.intervalEndTs) {
+      const secs = Math.max(0, (state.intervalEndTs - Date.now()) / 1000);
+      const m = Math.floor(secs / 60);
+      const s = Math.floor(secs % 60);
+      info += ` · ⏱ ${m}:${s.toString().padStart(2, '0')}`;
+    }
+    strikeEl.innerHTML = info || (state.updownFound ? 'Mercado detectado' : '');
+  }
+
   const mp = state.modelProb;
   if (mp != null && !isNaN(mp) && isFinite(mp)) {
     $('model-prob').textContent = fmtPct(mp);
@@ -1739,9 +1845,9 @@ function updatePolyDisplay() {
       return `<span style="color:${color}">${n > 0 ? '+' : ''}${(n*100).toFixed(0)}%</span>`;
     };
     $('sig-flow').innerHTML = fmtSig(sd.flow);
+    $('sig-strike').innerHTML = fmtSig(sd.strike);
     $('sig-cvd').innerHTML = fmtSig(sd.cvd);
     $('sig-ob').innerHTML = fmtSig(sd.ob);
-    $('sig-liq').innerHTML = fmtSig(sd.liq);
   }
 }
 
@@ -1755,6 +1861,28 @@ function updateDivergenceDisplay() {
   const probSube = model;
   const probBaja = 1 - model;
   const confianza = Math.abs(model - 0.5) * 2;  // 0 = sin idea, 1 = muy seguro
+
+  // ── Calcular EV real usando precios Up/Down de Polymarket ──
+  const hasMarketPrices = state.upPrice != null && state.downPrice != null &&
+                          state.upPrice > 0.01 && state.downPrice > 0.01;
+  let evUp = null, evDown = null;
+  if (hasMarketPrices) {
+    // EV por dólar apostado: (prob modelo / precio mercado) - 1
+    evUp = (probSube / state.upPrice) - 1;
+    evDown = (probBaja / state.downPrice) - 1;
+  }
+
+  // ── Calcular tiempo restante del intervalo ──
+  let secsRemaining = null;
+  if (state.intervalEndTs) {
+    secsRemaining = Math.max(0, (state.intervalEndTs - Date.now()) / 1000);
+  }
+
+  // ── Strike delta info ──
+  let strikeDeltaPct = null;
+  if (state.strikePrice && state.btcPrice) {
+    strikeDeltaPct = ((state.btcPrice - state.strikePrice) / state.strikePrice) * 100;
+  }
 
   // Meter: 0% = baja seguro, 100% = sube seguro
   const meterPct = Math.min(100, Math.max(0, model * 100));
@@ -1770,74 +1898,138 @@ function updateDivergenceDisplay() {
     fill.style.background = 'var(--red)';
   }
 
-  // EV badge — muestra la probabilidad dominante
+  // EV badge — muestra EV real si hay precios de mercado
   const evBadge = $('ev-badge');
-  if (confianza < 0.06) {
+  if (hasMarketPrices && confianza >= 0.06) {
+    const bestEv = evUp > evDown ? evUp : evDown;
+    const bestSide = evUp > evDown ? 'UP' : 'DOWN';
+    const bestPrice = evUp > evDown ? state.upPrice : state.downPrice;
+    if (bestEv > 0.05) {
+      evBadge.textContent = `EV ${bestSide}: +${(bestEv*100).toFixed(1)}% @ ${(bestPrice*100).toFixed(0)}¢`;
+      evBadge.className = 'ev-badge positive';
+    } else if (bestEv > 0) {
+      evBadge.textContent = `EV ${bestSide}: +${(bestEv*100).toFixed(1)}% (bajo, costos lo comen)`;
+      evBadge.className = 'ev-badge neutral';
+    } else {
+      evBadge.textContent = `EV negativo — No apostar`;
+      evBadge.className = 'ev-badge negative';
+    }
+  } else if (confianza < 0.06) {
     evBadge.textContent = `Prob: ~50% — Sin dirección clara`;
     evBadge.className = 'ev-badge neutral';
   } else if (model > 0.5) {
-    evBadge.textContent = `SUBE ${(probSube*100).toFixed(1)}% — Apostar SÍ`;
+    evBadge.textContent = `SUBE ${(probSube*100).toFixed(1)}% — Esperando precios Polymarket`;
     evBadge.className = 'ev-badge positive';
   } else {
-    evBadge.textContent = `BAJA ${(probBaja*100).toFixed(1)}% — Apostar NO`;
+    evBadge.textContent = `BAJA ${(probBaja*100).toFixed(1)}% — Esperando precios Polymarket`;
     evBadge.className = 'ev-badge negative';
   }
 
-  // Signal box — predicción clara SUBE/BAJA
+  // Signal box — predicción clara con EV real
   const signalBox   = $('signal-box');
   const signalTitle = $('signal-title');
   const signalDesc  = $('signal-desc');
   const signalIcon  = $('signal-icon');
 
-  const MIN_CONF = 0.16;  // 16% confianza mín → 58% modelo → EV+ después de spread Polymarket
+  const MIN_CONF = 0.16;
+  const MIN_EV = 0.05;  // 5% de edge mínimo después de costos
+
+  // Info del intervalo
+  let intervalInfo = '';
+  if (strikeDeltaPct != null) {
+    intervalInfo += `Strike: $${state.strikePrice.toLocaleString()} | Delta: ${strikeDeltaPct >= 0 ? '+' : ''}${strikeDeltaPct.toFixed(3)}%`;
+  }
+  if (secsRemaining != null) {
+    const mins = Math.floor(secsRemaining / 60);
+    const secs = Math.floor(secsRemaining % 60);
+    intervalInfo += ` | Quedan: ${mins}:${secs.toString().padStart(2, '0')}`;
+  }
 
   if (confianza < MIN_CONF) {
     signalBox.className   = 'signal-box neutral';
     signalIcon.textContent = '🔍';
     signalTitle.textContent = 'INDECISO — Probabilidad ~50%, sin dirección clara';
-    signalDesc.textContent  = `Modelo: ${fmtPct(model)}. Confianza insuficiente (${(confianza*100).toFixed(1)}% < ${(MIN_CONF*100)}%). Esperar mejor señal.`;
+    signalDesc.textContent  = `Modelo: ${fmtPct(model)}. Confianza insuficiente (${(confianza*100).toFixed(1)}% < ${(MIN_CONF*100)}%). Esperar mejor señal.` +
+      (intervalInfo ? `\n${intervalInfo}` : '');
+  } else if (hasMarketPrices) {
+    // Tenemos precios reales → mostrar EV
+    const bestEv = evUp > evDown ? evUp : evDown;
+    const betSide = evUp > evDown ? 'UP' : 'DOWN';
+    const betPrice = evUp > evDown ? state.upPrice : state.downPrice;
+    const betProb = evUp > evDown ? probSube : probBaja;
+
+    if (bestEv >= MIN_EV) {
+      signalBox.className = betSide === 'UP' ? 'signal-box bullish' : 'signal-box bearish';
+      signalIcon.textContent = betSide === 'UP' ? '📈' : '📉';
+      signalTitle.textContent = `Apostar ${betSide} — EV: +${(bestEv*100).toFixed(1)}% por dólar`;
+      signalDesc.textContent = `Modelo: ${(betProb*100).toFixed(1)}% prob ${betSide}. ` +
+        `Precio mercado: ${(betPrice*100).toFixed(0)}¢. ` +
+        `EV = (${(betProb*100).toFixed(0)}% / ${(betPrice*100).toFixed(0)}¢) - 1 = +${(bestEv*100).toFixed(1)}%. ` +
+        `[PAPER MODE]` +
+        (intervalInfo ? `\n${intervalInfo}` : '');
+    } else {
+      signalBox.className = 'signal-box neutral';
+      signalIcon.textContent = '⏸';
+      signalTitle.textContent = `Sin edge — EV insuficiente (${(bestEv*100).toFixed(1)}% < ${(MIN_EV*100)}%)`;
+      signalDesc.textContent = `Mejor: ${betSide} @ ${(betPrice*100).toFixed(0)}¢, modelo ${(betProb*100).toFixed(1)}%. ` +
+        `EV +${(bestEv*100).toFixed(1)}% no cubre costos (~5% spread). Esperar.` +
+        (intervalInfo ? `\n${intervalInfo}` : '');
+    }
   } else if (model > 0.5) {
     signalBox.className   = 'signal-box bullish';
     signalIcon.textContent = '📈';
-    signalTitle.textContent = `SUBE — ${(probSube*100).toFixed(1)}% prob. de subir en próximos minutos`;
-    const aiRef = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
-    signalDesc.textContent  = `El modelo predice que BTC va a SUBIR. ` +
-      `Confianza: ${(confianza*100).toFixed(0)}%.${aiRef} ` +
-      `Apostar SÍ en Polymarket. [PAPER MODE]`;
+    signalTitle.textContent = `SUBE — ${(probSube*100).toFixed(1)}% prob. de subir`;
+    signalDesc.textContent  = `Sin precios Polymarket. Confianza: ${(confianza*100).toFixed(0)}%. ` +
+      `Apostar UP si Up < ${(probSube*100).toFixed(0)}¢. [PAPER MODE]` +
+      (intervalInfo ? `\n${intervalInfo}` : '');
   } else {
     signalBox.className   = 'signal-box bearish';
     signalIcon.textContent = '📉';
-    signalTitle.textContent = `BAJA — ${(probBaja*100).toFixed(1)}% prob. de bajar en próximos minutos`;
-    const aiRef = state.aiForecast != null ? ` | IA: ${fmtPct(state.aiForecast)}` : '';
-    signalDesc.textContent  = `El modelo predice que BTC va a BAJAR. ` +
-      `Confianza: ${(confianza*100).toFixed(0)}%.${aiRef} ` +
-      `Apostar NO en Polymarket. [PAPER MODE]`;
+    signalTitle.textContent = `BAJA — ${(probBaja*100).toFixed(1)}% prob. de bajar`;
+    signalDesc.textContent  = `Sin precios Polymarket. Confianza: ${(confianza*100).toFixed(0)}%. ` +
+      `Apostar DOWN si Down < ${(probBaja*100).toFixed(0)}¢. [PAPER MODE]` +
+      (intervalInfo ? `\n${intervalInfo}` : '');
   }
 }
 
 // ─── Historial ────────────────────────────────────────────────────
 function logToHistory() {
-  const poly  = state.polyProb;
   const model = state.modelProb;
-  if (poly == null || model == null || state.btcPrice == null) return;
+  if (model == null || state.btcPrice == null) return;
 
-  const div = model - poly;
-  const ev  = Math.abs(div) > 0.005
-    ? (Math.abs(div) / (div > 0 ? (1 - poly) : poly) * 100).toFixed(1) + '%'
-    : '~0%';
-
+  const probSube = model;
+  const probBaja = 1 - model;
   const confianza = Math.abs(model - 0.5) * 2;
-  const signal = confianza < 0.03 ? 'wait'
+
+  // Calcular EV real si tenemos precios de mercado
+  let evStr = '—';
+  if (state.upPrice && state.downPrice) {
+    const evUp = (probSube / state.upPrice) - 1;
+    const evDown = (probBaja / state.downPrice) - 1;
+    const bestEv = Math.max(evUp, evDown);
+    evStr = bestEv > 0 ? `+${(bestEv*100).toFixed(1)}%` : `${(bestEv*100).toFixed(1)}%`;
+  }
+
+  const signal = confianza < 0.16 ? 'wait'
                : model > 0.5     ? 'sube'
                :                    'baja';
+
+  // Strike delta
+  let deltaStr = '—';
+  if (state.strikePrice && state.btcPrice) {
+    const d = ((state.btcPrice - state.strikePrice) / state.strikePrice * 100);
+    deltaStr = (d >= 0 ? '+' : '') + d.toFixed(3) + '%';
+  }
+
+  const polyStr = state.upPrice ? `U${(state.upPrice*100).toFixed(0)}¢/D${(state.downPrice*100).toFixed(0)}¢` : '—';
 
   const row = {
     time:  new Date().toLocaleTimeString('es-ES', {hour:'2-digit',minute:'2-digit',second:'2-digit'}),
     btc:   fmtUSD(state.btcPrice),
-    poly:  fmtPct(poly),
+    poly:  polyStr,
     model: fmtPct(model),
-    div:   (div >= 0 ? '+' : '') + (div * 100).toFixed(1) + '%',
-    ev,
+    div:   deltaStr,
+    ev:    evStr,
     signal,
   };
 
